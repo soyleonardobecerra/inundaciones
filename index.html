@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#080e1a">
+<meta name="description" content="Alertas reales de inundaciones, deslizamientos y crecientes — Norte de Santander, Colombia">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AlertaRíos">
+<link rel="manifest" href="manifest.json">
+<title>AlertaRíos — Alertas Reales</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp }                          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getAnalytics, logEvent, setUserProperties } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js';
+  import { getFirestore, collection, doc, onSnapshot, addDoc, serverTimestamp, query, orderBy, limit }
+                                                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+  import { getMessaging, getToken, onMessage }      from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js';
+
+  // ── Credenciales reales ────────────────────────────
+  const FIREBASE_CONFIG = {
+    apiKey:            "AIzaSyBcFTa8AmXQWxl4IhgaqoMJAc0Y5KAUsjE",
+    authDomain:        "inundacionescolombia-80a5f.firebaseapp.com",
+    projectId:         "inundacionescolombia-80a5f",
+    storageBucket:     "inundacionescolombia-80a5f.firebasestorage.app",
+    messagingSenderId: "320187419062",
+    appId:             "1:320187419062:web:cee605c8c4667ff560d917",
+    measurementId:     "G-4V1DP5SYB0"
+  };
+  const VAPID_KEY = "BGwOGzkjr3JQyy6QdHMIUFK5W-Ct5spaAABTfjPaWeqcC6snWkcSQPiSrL5O5RFvS2JYfJLlptKKNAUXV7iln1I";
+
+  // ── Inicializar ────────────────────────────────────
+  const app       = initializeApp(FIREBASE_CONFIG);
+  const analytics = getAnalytics(app);
+
+  // ── Expose analytics helper globally ───────────────
+  // All app events go through window.track(eventName, params)
+  // so the rest of the code stays clean
+  window.track = (event, params = {}) => {
+    try {
+      logEvent(analytics, event, {
+        ...params,
+        app_version: '2.1',
+        region: 'norte_de_santander',
+      });
+    } catch (e) {
+      // Analytics never breaks the app
+    }
+  };
+
+  // ── Session start — log municipio and device type ──
+  const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+  window.track('session_start', {
+    device_type: isMobile ? 'mobile' : 'desktop',
+    municipio:   window.state?.municipioActivo || 'cucuta',
+  });
+
+  // ── Track notification permission state ────────────
+  if ('Notification' in window) {
+    window.track('notification_permission_state', {
+      state: Notification.permission,
+    });
+  }
+  const db        = getFirestore(app);
+  const messaging = getMessaging(app);
+
+  // ── Escuchar alertas en tiempo real desde Firestore ─
+  // Se conecta en cuanto carga la app y actualiza el feed sin recargar
+  const alertsQ = query(
+    collection(db, 'alerts'),
+    orderBy('timestamp', 'desc'),
+    limit(30)
+  );
+
+  onSnapshot(alertsQ, snapshot => {
+    const firestoreAlerts = snapshot.docs.map(d => {
+      const data = d.data();
+      return {
+        id:        d.id,
+        level:     data.level  || 'info',
+        src:       data.source === 'IDEAM Oficial' ? 'ideam_oficial'
+                     : data.source ? data.source.toLowerCase().replace(/\s/g,'_') : 'glofas',
+        src_label: data.source || 'Firebase',
+        title:     data.title  || '',
+        desc:      data.body   || '',
+        time:      data.timestamp?.toDate
+                     ? timeAgo(data.timestamp.toDate())
+                     : 'Ahora',
+        rio:       data.rio_id  || null,
+        zona_id:   data.zona_id || null,
+        tipo:      data.type === 'landslide' ? 'slide' : undefined,
+        categoria: data.type === 'landslide' ? 'slide' : 'glofas',
+      };
+    });
+
+    // Mezclar alertas de Firestore con las calculadas localmente
+    // Las de Firestore tienen prioridad (son las generadas por Cloud Functions)
+    if (firestoreAlerts.length > 0) {
+      window._firestoreAlerts = firestoreAlerts;
+      // Actualizar live feed si ya está inicializado
+      if (window.state) {
+        window.state.liveAlerts = firestoreAlerts;
+        // Mantener alertas locales que no estén en Firestore aún
+        window.state.alerts = [
+          ...firestoreAlerts,
+          ...window.state.alerts.filter(a => a.src === 'comunidad')
+        ];
+        if (typeof renderFeed    === 'function') renderFeed();
+        if (typeof renderLiveFeed === 'function') renderLiveFeed();
+        // Actualizar badge
+        const cnt = firestoreAlerts.filter(a => a.level === 'danger' || a.level === 'warn').length;
+        const badge = document.getElementById('live-badge');
+        const liveCount = document.getElementById('live-count');
+        if (badge)     { badge.style.display = cnt > 0 ? 'block' : 'none'; badge.textContent = cnt; }
+        if (liveCount) liveCount.textContent = `${cnt} activa${cnt !== 1 ? 's' : ''}`;
+      }
+    }
+  }, err => console.warn('[Firestore] Error onSnapshot:', err.message));
+
+  // ── Escuchar estado de ríos en tiempo real ──────────
+  onSnapshot(doc(db, 'rivers_status', 'latest'), snap => {
+    if (!snap.exists() || !window.state) return;
+    const data = snap.data();
+    // Mezclar con datos locales (GloFAS directo)
+    // Solo sobreescribir si el dato de Firestore es más reciente
+    Object.entries(data).forEach(([id, val]) => {
+      if (id.startsWith('_')) return;
+      if (!window.state.rios[id] || val.timestamp > (window.state.rios[id]._ts || 0)) {
+        window.state.rios[id] = { ...window.state.rios[id], ...val, _ts: val.timestamp };
+      }
+    });
+  }, err => console.warn('[Firestore] rivers_status error:', err.message));
+
+  // ── Escuchar estado de deslizamientos en tiempo real ─
+  onSnapshot(doc(db, 'landslide_status', 'latest'), snap => {
+    if (!snap.exists() || !window.state) return;
+    const data = snap.data();
+    // Actualizar estado de deslizamientos con datos de Cloud Functions
+    if (window.state.deslizamientos) {
+      window.state.deslizamientos = window.state.deslizamientos.map(z => {
+        const fs = data[z.id];
+        if (!fs) return z;
+        return { ...z, riesgo_actual: fs.riesgo, razon: fs.razon };
+      });
+      if (typeof renderDeslizamientos === 'function') renderDeslizamientos();
+    }
+  }, err => console.warn('[Firestore] landslide_status error:', err.message));
+
+  // ── Registrar token FCM para push notifications ─────
+  window.registerFCMToken = async () => {
+    try {
+      await navigator.serviceWorker.ready;
+      const token = await getToken(messaging, {
+        vapidKey: VAPID_KEY,
+        serviceWorkerRegistration: await navigator.serviceWorker.getRegistration()
+      });
+      if (token) {
+        await fetch('/api/register-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+        console.log('[FCM] Token registrado');
+        return true;
+      }
+    } catch (e) {
+      console.warn('[FCM] No se pudo registrar token:', e.message);
+      return false;
+    }
+  };
+
+  // ── Push en primer plano (app abierta) ─────────────
+  onMessage(messaging, payload => {
+    const { title, body } = payload.notification || {};
+    const level = payload.data?.level || 'info';
+    // Agregar al feed en vivo inmediatamente
+    if (window.state) {
+      window.state.liveAlerts.unshift({
+        level, src: 'firebase', src_label: 'Firebase Push',
+        title: title || 'Nueva alerta',
+        desc:  body  || '',
+        time:  'Ahora',
+        tipo:  payload.data?.type === 'landslide' ? 'slide' : undefined,
+      });
+      if (typeof renderLiveFeed === 'function') renderLiveFeed();
+    }
+    // Toast visual si la app está abierta
+    showToast(title, body, level);
+  });
+
+  // ── Enviar reporte ciudadano a Firestore ────────────
+  window.submitToFirestore = async (report) => {
+    try {
+      await addDoc(collection(db, 'alerts'), {
+        ...report,
+        type:      'citizen_report',
+        source:    'Reporte ciudadano',
+        timestamp: serverTimestamp(),
+      });
+      return true;
+    } catch (e) {
+      console.warn('[Firestore] Error guardando reporte:', e.message);
+      return false;
+    }
+  };
+
+  // ── Helper: tiempo relativo ─────────────────────────
+  function timeAgo(date) {
+    const s = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (s < 60)  return 'Ahora';
+    if (s < 3600) return `hace ${Math.floor(s/60)}min`;
+    if (s < 86400) return `hace ${Math.floor(s/3600)}h`;
+    return `hace ${Math.floor(s/86400)}d`;
+  }
+
+  // ── Toast visual para mensajes en primer plano ──────
+  function showToast(title, body, level) {
+    const colors = { danger: '#f0433a', warn: '#f5a623', ok: '#22d98a', slide: '#c874ff' };
+    const toast = document.createElement('div');
+    toast.style.cssText = `
+      position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:9999;
+      background:#0d1525;border:1px solid ${colors[level]||'#38b4ff'};
+      border-radius:10px;padding:12px 16px;max-width:320px;width:90%;
+      box-shadow:0 8px 32px rgba(0,0,0,.6);font-family:'Space Grotesk',sans-serif;
+    `;
+    toast.innerHTML = `
+      <div style="font-size:12px;font-weight:700;color:${colors[level]||'#38b4ff'};margin-bottom:3px">${title||'Alerta'}</div>
+      <div style="font-size:11px;color:#8aacc8;line-height:1.5">${body||''}</div>
+    `;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+  }
+  window.showToast = showToast;
+</script>
+<style>
+/* ═══════════════════════════════════════════
+   AlertaRíos — Sistema de diseño v3
+   Principio: claridad antes que estética.
+   La respuesta a "¿estoy en peligro?" en 2s.
+═══════════════════════════════════════════ */
+:root {
+  --bg:      #07111f;
+  --surface: #0c1a2e;
+  --surf2:   #102035;
+  --border:  rgba(255,255,255,0.08);
+  --text:    #e8f1fb;
+  --sub:     #6b8aaa;
+  --accent:  #3aa8f0;
+
+  /* Semáforo — solo 3 colores de estado */
+  --ok:      #1db87a;
+  --warn:    #f0a500;
+  --danger:  #e83535;
+  --slide:   #a855f7;
+
+  --r:  12px;
+  --r2: 18px;
+}
+
+* { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent }
+html { scroll-behavior:smooth }
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* ── EMERGENCY BANNER ──────────────────────── */
+#banner {
+  display: none;
+  position: sticky; top: 0; z-index: 400;
+  background: var(--danger);
+  color: #fff;
+  padding: 12px 20px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .2px;
+  animation: flash-bg 1.2s infinite;
+}
+#banner.show { display: block }
+@keyframes flash-bg { 0%,100%{background:#c62828} 50%{background:#ef5350} }
+
+/* ── HEADER ────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 200;
+  background: rgba(7,17,31,.97);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+.hdr { display:flex; align-items:center; justify-content:space-between; height:54px; max-width:640px; margin:0 auto }
+.logo { display:flex; align-items:center; gap:10px; text-decoration:none; color:inherit }
+.logo-icon { width:34px; height:34px; background:var(--danger); border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; transition:background .5s }
+.logo-icon.ok    { background: var(--ok) }
+.logo-icon.warn  { background: var(--warn) }
+.logo-icon.danger{ background: var(--danger); animation: pulse-ico 1s infinite }
+@keyframes pulse-ico { 0%,100%{opacity:1} 50%{opacity:.7} }
+.logo-name { font-size:16px; font-weight:700 }
+.hdr-status { font-size:12px; font-weight:600; color: var(--sub) }
+.hdr-status.ok     { color: var(--ok) }
+.hdr-status.warn   { color: var(--warn) }
+.hdr-status.danger { color: var(--danger) }
+
+/* ── LOCATION BAR ──────────────────────────── */
+.loc-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+.loc-inner { max-width:640px; margin:0 auto; display:flex; align-items:center; gap:10px; height:44px }
+.loc-icon  { font-size:15px; flex-shrink:0 }
+.loc-select {
+  flex: 1;
+  background: transparent; border: none;
+  color: var(--text); font-size:14px; font-weight:600;
+  outline: none; cursor:pointer;
+  appearance:none; -webkit-appearance:none;
+}
+.loc-select option { background:#0c1a2e }
+.loc-chevron { color:var(--sub); font-size:12px; flex-shrink:0 }
+.loc-gps {
+  background: var(--surf2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 5px 12px;
+  font-size: 12px; font-weight: 700; color: var(--accent);
+  cursor:pointer; white-space:nowrap;
+  font-family: inherit;
+}
+.loc-gps:active { opacity:.7 }
+
+/* ── MAIN ──────────────────────────────────── */
+main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
+
+/* ══ BLOQUE GRANDE DE ESTADO ══
+   La respuesta inmediata. Ocupa toda la pantalla.
+   Color de fondo cambia según nivel de riesgo.
+*/
+.big-status {
+  border-radius: var(--r2);
+  padding: 28px 24px 24px;
+  margin-bottom: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+  transition: background .4s, border-color .4s;
+}
+.big-status.ok     { border-color: rgba(29,184,122,.2) }
+.big-status.warn   { border-color: rgba(240,165,0,.3);   background: rgba(240,165,0,.06) }
+.big-status.danger { border-color: rgba(232,53,53,.4);   background: rgba(232,53,53,.08); animation: danger-pulse 2s infinite }
+@keyframes danger-pulse { 0%,100%{background:rgba(232,53,53,.08)} 50%{background:rgba(232,53,53,.14)} }
+
+/* Barra de color superior */
+.big-status::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:4px;
+  background: var(--ok); border-radius: var(--r2) var(--r2) 0 0;
+  transition: background .4s;
+}
+.big-status.warn::before   { background: var(--warn) }
+.big-status.danger::before { background: var(--danger); animation: flash-line .8s infinite }
+@keyframes flash-line { 0%,100%{opacity:1} 50%{opacity:.2} }
+
+/* Etiqueta pequeña arriba */
+.bs-label {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1.2px;
+  color: var(--sub); margin-bottom: 8px;
+}
+
+/* La respuesta grande */
+.bs-answer {
+  font-size: 36px; font-weight: 800;
+  line-height: 1.1; margin-bottom: 6px;
+  color: var(--ok);
+  transition: color .4s;
+}
+.big-status.warn   .bs-answer { color: var(--warn) }
+.big-status.danger .bs-answer { color: var(--danger) }
+
+/* Frase explicativa en lenguaje claro */
+.bs-detail {
+  font-size: 15px; color: var(--sub); line-height: 1.5;
+  margin-bottom: 20px;
+}
+.bs-detail strong { color: var(--text) }
+
+/* Acción recomendada */
+.bs-action {
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(255,255,255,.05);
+  border-radius: 10px; padding: 12px 14px;
+  font-size: 13px; line-height: 1.4;
+}
+.bs-action-ico { font-size: 22px; flex-shrink:0 }
+.bs-action-txt { color: var(--sub) }
+.bs-action-txt strong { color: var(--text); display:block; margin-bottom:2px }
+
+/* ── BOTÓN DE NOTIFICACIONES ──────────────── */
+.notif-btn {
+  width: 100%; margin-bottom: 12px;
+  padding: 14px; border-radius: var(--r);
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--sub); font-size:14px; font-weight:600;
+  cursor:pointer; display:flex; align-items:center;
+  justify-content:center; gap:8px;
+  font-family: inherit;
+  transition: border-color .2s, color .2s;
+}
+.notif-btn:active { opacity:.8 }
+.notif-btn.on {
+  border-color: var(--ok); color: var(--ok);
+  background: rgba(29,184,122,.07);
+}
+
+/* ── RÍOS — lista vertical simple ────────── */
+.section-title {
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1.2px;
+  color: var(--sub); margin: 20px 0 8px;
+  display: flex; align-items:center; gap:8px;
+}
+.section-title::after { content:''; flex:1; height:1px; background:var(--border) }
+
+.rio-list { display:flex; flex-direction:column; gap:8px }
+
+.rio-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 14px 16px;
+  display: flex; align-items:center; gap:14px;
+  cursor:pointer; transition:border-color .15s;
+  position:relative; overflow:hidden;
+}
+.rio-item::before {
+  content:''; position:absolute;
+  left:0; top:0; bottom:0; width:3px;
+  background: var(--ok);
+}
+.rio-item.warn::before   { background: var(--warn) }
+.rio-item.danger::before { background: var(--danger); animation:flash-line .8s infinite }
+.rio-item.danger { border-color:rgba(232,53,53,.3); background:rgba(232,53,53,.04) }
+.rio-item.warn   { border-color:rgba(240,165,0,.25) }
+.rio-item:active { opacity:.85 }
+
+/* Dot de estado en río */
+.rio-dot {
+  width: 14px; height:14px; border-radius:50%; flex-shrink:0;
+  background: var(--ok);
+}
+.rio-dot.warn   { background: var(--warn) }
+.rio-dot.danger { background: var(--danger); animation: pulse-dot 1s infinite }
+@keyframes pulse-dot { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.4);opacity:.6} }
+
+.rio-info { flex:1; min-width:0 }
+.rio-name { font-size:15px; font-weight:700; margin-bottom:1px }
+.rio-sub  { font-size:12px; color:var(--sub) }
+.rio-sub.warn   { color:var(--warn) }
+.rio-sub.danger { color:var(--danger); font-weight:600 }
+
+.rio-level {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  letter-spacing:.6px; padding:4px 10px; border-radius:20px;
+  flex-shrink:0;
+  background: rgba(29,184,122,.12); color:var(--ok); border:1px solid rgba(29,184,122,.2);
+}
+.rio-level.warn   { background:rgba(240,165,0,.12); color:var(--warn); border-color:rgba(240,165,0,.2) }
+.rio-level.danger { background:rgba(232,53,53,.15); color:var(--danger); border-color:rgba(232,53,53,.3); animation:blink .9s infinite }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+/* Etiqueta "cercano" */
+.rio-near {
+  position:absolute; top:8px; right:10px;
+  font-size:9px; font-weight:700; text-transform:uppercase;
+  letter-spacing:.5px; color:var(--accent);
+}
+
+/* ── DESLIZAMIENTOS ───────────────────────── */
+.slide-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--slide);
+  border-radius: var(--r); padding:14px 16px;
+  margin-bottom:8px;
+}
+.slide-item.ok { border-left-color: var(--ok) }
+.slide-top  { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px }
+.slide-name { font-size:14px; font-weight:700 }
+.slide-badge {
+  font-size:10px; font-weight:700; text-transform:uppercase;
+  padding:3px 9px; border-radius:20px; flex-shrink:0;
+}
+.slide-badge.ok     { background:rgba(29,184,122,.12); color:var(--ok) }
+.slide-badge.warn   { background:rgba(240,165,0,.12);  color:var(--warn) }
+.slide-badge.danger { background:rgba(232,53,53,.12);  color:var(--danger) }
+.slide-desc { font-size:13px; color:var(--sub); line-height:1.5 }
+
+/* ── PRONÓSTICO ──────────────────────────── */
+.forecast {
+  display:flex; gap:7px; overflow-x:auto;
+  padding-bottom:4px; margin-bottom:4px;
+  scrollbar-width:none;
+}
+.forecast::-webkit-scrollbar { display:none }
+.fday-chip {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; padding:10px 8px; min-width:64px;
+  text-align:center; flex-shrink:0;
+}
+.fday-chip.alert { border-color:rgba(240,165,0,.3); background:rgba(240,165,0,.07) }
+.fday-chip.danger{ border-color:rgba(232,53,53,.3);  background:rgba(232,53,53,.06) }
+.fd-day  { font-size:10px; color:var(--sub); margin-bottom:4px }
+.fd-ico  { font-size:20px; margin-bottom:4px }
+.fd-mm   { font-size:13px; font-weight:700 }
+.fd-mm.lo{ color:var(--ok) }
+.fd-mm.md{ color:var(--warn) }
+.fd-mm.hi{ color:var(--danger) }
+.fd-pct  { font-size:10px; color:var(--sub); margin-top:2px }
+
+/* ── FEED ALERTAS ────────────────────────── */
+.alert-item {
+  background:var(--surface); border:1px solid var(--border);
+  border-left:3px solid var(--ok);
+  border-radius:var(--r); padding:14px 16px; margin-bottom:8px;
+}
+.alert-item.warn   { border-left-color:var(--warn);   background:rgba(240,165,0,.04) }
+.alert-item.danger { border-left-color:var(--danger);  background:rgba(232,53,53,.05) }
+.alert-item.slide  { border-left-color:var(--slide) }
+.ai-top   { display:flex; justify-content:space-between; margin-bottom:5px; gap:8px }
+.ai-src   { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; color:var(--accent) }
+.ai-src.ideam_oficial { color:var(--ok) }
+.ai-src.reporte_ciudadano { color:var(--warn) }
+.ai-time  { font-size:10px; color:var(--sub); flex-shrink:0 }
+.ai-title { font-size:14px; font-weight:700; line-height:1.35; margin-bottom:3px }
+.ai-desc  { font-size:13px; color:var(--sub); line-height:1.5 }
+
+/* ── EN VIVO ─────────────────────────────── */
+.live-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px }
+.live-title{ font-size:20px; font-weight:800 }
+.live-count{
+  background:rgba(232,53,53,.12); border:1px solid rgba(232,53,53,.25);
+  color:var(--danger); font-size:12px; font-weight:700;
+  padding:4px 12px; border-radius:20px;
+}
+.live-count.ok { background:rgba(29,184,122,.1); border-color:rgba(29,184,122,.2); color:var(--ok) }
+
+.filter-row { display:flex; gap:7px; overflow-x:auto; margin-bottom:14px; scrollbar-width:none }
+.filter-row::-webkit-scrollbar { display:none }
+.fbtn {
+  background:var(--surf2); border:1px solid var(--border);
+  border-radius:20px; padding:6px 14px;
+  font-size:12px; font-weight:600; color:var(--sub);
+  cursor:pointer; white-space:nowrap; font-family:inherit;
+  transition:all .15s;
+}
+.fbtn.active { background:var(--accent); border-color:var(--accent); color:#07111f }
+.fbtn:active { opacity:.7 }
+
+.lcard {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); padding:16px; margin-bottom:10px;
+}
+.lcard.danger { border-color:rgba(232,53,53,.3); background:rgba(232,53,53,.05) }
+.lcard.warn   { border-color:rgba(240,165,0,.25) }
+.lcard.slide  { border-color:rgba(168,85,247,.25) }
+.lc-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px }
+.lc-lvl { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.6px }
+.lc-lvl.danger { color:var(--danger) }
+.lc-lvl.warn   { color:var(--warn) }
+.lc-lvl.ok     { color:var(--ok) }
+.lc-lvl.slide  { color:var(--slide) }
+.lc-dot { width:7px; height:7px; border-radius:50% }
+.lc-dot.danger { background:var(--danger); animation:pulse-dot 1s infinite }
+.lc-dot.warn   { background:var(--warn) }
+.lc-dot.ok     { background:var(--ok) }
+.lc-dot.slide  { background:var(--slide) }
+.lc-time { font-size:11px; color:var(--sub) }
+.lc-title { font-size:15px; font-weight:700; line-height:1.3; margin-bottom:5px }
+.lc-body  { font-size:13px; color:var(--sub); line-height:1.55 }
+.lc-btns  { display:flex; gap:8px; margin-top:12px }
+.lc-btn {
+  background:var(--surf2); border:1px solid var(--border);
+  border-radius:8px; padding:7px 14px;
+  font-size:12px; font-weight:600; color:var(--sub);
+  cursor:pointer; font-family:inherit;
+}
+.lc-btn.primary { background:var(--accent); border-color:var(--accent); color:#07111f }
+.lc-btn:active  { opacity:.7 }
+
+/* ── MAPA ────────────────────────────────── */
+.map-wrap  { border-radius:var(--r2); overflow:hidden; margin-bottom:12px; border:1px solid var(--border); position:relative }
+#map       { width:100%; height:340px }
+.map-leg   { position:absolute; bottom:10px; left:10px; z-index:400; background:rgba(7,17,31,.92); backdrop-filter:blur(8px); border:1px solid var(--border); border-radius:9px; padding:9px 12px; font-size:11px; color:var(--sub) }
+.mleg-row  { display:flex; align-items:center; gap:7px; margin-bottom:4px }
+.mleg-row:last-child { margin-bottom:0 }
+.mleg-dot  { width:8px; height:8px; border-radius:50%; flex-shrink:0 }
+.map-tools { position:absolute; top:10px; right:10px; z-index:400; display:flex; flex-direction:column; gap:6px }
+.map-tool  { background:rgba(7,17,31,.9); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:13px; cursor:pointer; color:var(--text) }
+.map-tool:active { opacity:.7 }
+
+/* ── REPORTAR ────────────────────────────── */
+.tipo-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px }
+.tipo-btn  {
+  background:var(--surface); border:1.5px solid var(--border);
+  border-radius:var(--r); padding:14px 10px; text-align:center;
+  cursor:pointer; font-size:13px; font-weight:600; color:var(--sub);
+  transition:all .15s; font-family:inherit;
+}
+.tipo-btn .tipo-ico { font-size:24px; display:block; margin-bottom:5px }
+.tipo-btn.sel { border-color:var(--accent); color:var(--text); background:rgba(58,168,240,.1) }
+.tipo-btn:active { opacity:.8 }
+
+.form-lbl {
+  font-size:12px; font-weight:600; color:var(--sub);
+  text-transform:uppercase; letter-spacing:.7px;
+  display:block; margin-bottom:6px;
+}
+.form-input,.form-select,.form-textarea {
+  width:100%; background:var(--surf2);
+  border:1px solid var(--border); border-radius:10px;
+  padding:12px 14px; color:var(--text);
+  font-family:inherit; font-size:15px;
+  margin-bottom:14px; outline:none;
+  transition:border-color .2s;
+  -webkit-appearance:none; appearance:none;
+}
+.form-input:focus,.form-select:focus,.form-textarea:focus { border-color:var(--accent) }
+.form-textarea { resize:vertical; min-height:80px }
+.form-submit {
+  width:100%; background:var(--danger); color:#fff;
+  border:none; border-radius:10px; padding:16px;
+  font-family:inherit; font-size:16px; font-weight:700;
+  cursor:pointer; transition:opacity .2s;
+}
+.form-submit:active { opacity:.85 }
+
+/* ── EMERGENCIAS ─────────────────────────── */
+.emerg-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:16px }
+.emerg-card {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); padding:18px 12px; text-align:center;
+  text-decoration:none; transition:border-color .15s;
+  display:block;
+}
+.emerg-card:active { border-color:var(--danger); background:rgba(232,53,53,.07) }
+.e-ico  { font-size:24px; margin-bottom:5px }
+.e-name { font-size:11px; font-weight:600; color:var(--sub); margin-bottom:3px }
+.e-num  { font-size:26px; font-weight:800; color:var(--danger) }
+
+/* ── AJUSTES ─────────────────────────────── */
+.setting-row {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); padding:14px 16px;
+  display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:8px;
+}
+.s-label { font-size:15px; font-weight:600 }
+.s-sub   { font-size:12px; color:var(--sub); margin-top:2px }
+.toggle  {
+  width:44px; height:24px; border-radius:12px;
+  background:var(--surf2); border:1px solid var(--border);
+  position:relative; cursor:pointer; flex-shrink:0;
+  transition:background .3s;
+}
+.toggle.on { background:var(--ok); border-color:var(--ok) }
+.toggle::after {
+  content:''; position:absolute;
+  width:18px; height:18px; background:#fff; border-radius:50%;
+  top:2px; left:2px; transition:transform .3s;
+  box-shadow:0 1px 3px rgba(0,0,0,.3);
+}
+.toggle.on::after { transform:translateX(20px) }
+
+.info-box {
+  background:rgba(58,168,240,.07); border:1px solid rgba(58,168,240,.15);
+  border-radius:var(--r); padding:13px 15px;
+  font-size:13px; color:var(--sub); line-height:1.6; margin-bottom:10px;
+}
+.info-box strong { color:var(--accent) }
+
+/* ── BOTTOM NAV ──────────────────────────── */
+.bnav {
+  position:fixed; bottom:0; left:0; right:0; z-index:200;
+  background:rgba(7,17,31,.97); backdrop-filter:blur(24px);
+  border-top:1px solid var(--border);
+  display:flex;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.nitem {
+  flex:1; display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  padding:9px 4px; cursor:pointer;
+  color:var(--sub); font-size:10px; font-weight:600;
+  gap:3px; border:none; background:none;
+  text-transform:uppercase; letter-spacing:.3px;
+  transition:color .2s; position:relative;
+  font-family:inherit;
+}
+.nitem.active { color:var(--accent) }
+.nitem .nicon { font-size:20px }
+.nbadge {
+  position:absolute; top:6px; right:calc(50% - 18px);
+  background:var(--danger); color:#fff;
+  border-radius:6px; font-size:9px; font-weight:700;
+  padding:1px 5px; min-width:16px; text-align:center;
+}
+
+/* ── TABS ────────────────────────────────── */
+.tab { display:none } .tab.active { display:block }
+
+/* ── LOADER ──────────────────────────────── */
+.loading-msg { text-align:center; padding:24px; color:var(--sub); font-size:14px }
+.spin { display:inline-block; animation:spin 1s linear infinite; margin-right:6px }
+@keyframes spin { to{transform:rotate(360deg)} }
+
+/* ── SECTION DIVIDER ─────────────────────── */
+.sdiv {
+  font-size:11px; font-weight:700;
+  text-transform:uppercase; letter-spacing:1.2px;
+  color:var(--sub); margin:20px 0 10px;
+  display:flex; align-items:center; gap:8px;
+}
+.sdiv::after { content:''; flex:1; height:1px; background:var(--border) }
+
+/* ── NACIMIENTOS ─────────────────────────── */
+.nac-card {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); padding:14px 16px; margin-bottom:8px;
+}
+.nac-top  { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px }
+.nac-name { font-size:14px; font-weight:700 }
+.nac-src  { font-size:11px; color:var(--sub); margin-top:2px }
+.nac-badge {
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.5px;
+  padding:3px 10px; border-radius:20px;
+}
+.nac-badge.ok     { background:rgba(29,184,122,.12); color:var(--ok) }
+.nac-badge.warn   { background:rgba(240,165,0,.12);  color:var(--warn) }
+.nac-badge.danger { background:rgba(232,53,53,.12);  color:var(--danger) }
+.nac-row  { display:flex; gap:6px }
+.nac-stat {
+  flex:1; background:var(--surf2); border-radius:8px;
+  padding:8px; text-align:center;
+}
+.nac-val  { font-size:15px; font-weight:700; color:var(--accent) }
+.nac-lbl  { font-size:10px; color:var(--sub); margin-top:2px; text-transform:uppercase; letter-spacing:.4px }
+.nac-msg  { margin-top:10px; font-size:13px; color:var(--sub); line-height:1.5 }
+.nac-msg.warn   { color:var(--warn) }
+.nac-msg.danger { color:var(--danger); font-weight:600 }
+</style>
+</head>
+<body>
+
+<div id="banner"></div>
+
+<header>
+  <div class="hdr">
+    <a class="logo" href="#">
+      <div class="logo-icon ok" id="hdr-icon">🌊</div>
+      <div class="logo-name">AlertaRíos</div>
+    </a>
+    <div class="hdr-status ok" id="hdr-status">Cargando...</div>
+  </div>
+</header>
+
+<div class="loc-bar">
+  <div class="loc-inner">
+    <span class="loc-icon">📍</span>
+    <select class="loc-select" id="loc-select" onchange="onMunicipioChange(this.value)">
+      <option value="cucuta">Cúcuta</option>
+      <option value="villa_rosario">Villa del Rosario</option>
+      <option value="los_patios">Los Patios</option>
+      <option value="pamplona">Pamplona</option>
+      <option value="ocana">Ocaña</option>
+      <option value="tibú">Tibú</option>
+      <option value="sardinata">Sardinata</option>
+      <option value="convencion">Convención</option>
+      <option value="el_carmen">El Carmen</option>
+      <option value="cachira">Cáchira</option>
+      <option value="abrego">Ábrego</option>
+    </select>
+    <span class="loc-chevron">▾</span>
+    <button class="loc-gps" onclick="useGPS()">📡 GPS</button>
+  </div>
+</div>
+
+<main>
+
+<!-- ════ TAB INICIO ════ -->
+<div class="tab active" id="tab-inicio">
+
+  <!-- BLOQUE PRINCIPAL: respuesta inmediata -->
+  <div class="big-status ok" id="main-hero">
+    <div class="bs-label" id="hero-region">Norte de Santander</div>
+    <div class="bs-answer" id="hero-level">Consultando...</div>
+    <div class="bs-detail" id="hero-detail">Obteniendo datos de ríos y clima...</div>
+    <div class="bs-action" id="hero-action">
+      <div class="bs-action-ico">⏳</div>
+      <div class="bs-action-txt"><strong>Un momento</strong>Conectando con GloFAS y Open-Meteo</div>
+    </div>
+  </div>
+
+  <button class="notif-btn" id="notify-btn" onclick="toggleNotify()">🔔 Activar alertas en mi celular</button>
+
+  <!-- RÍOS -->
+  <div class="sdiv">Ríos cerca de ti</div>
+  <div class="rio-list" id="river-grid">
+    <div class="loading-msg"><span class="spin">⟳</span> Cargando ríos...</div>
+  </div>
+
+  <!-- DESLIZAMIENTOS -->
+  <div class="sdiv">Zonas de deslizamiento</div>
+  <div id="slide-container">
+    <div class="loading-msg"><span class="spin">⟳</span> Evaluando riesgo...</div>
+  </div>
+
+  <!-- NACIMIENTOS -->
+  <div class="sdiv">Nacimientos monitoreados</div>
+  <div id="nacimientos-container">
+    <div class="loading-msg"><span class="spin">⟳</span> Consultando...</div>
+  </div>
+
+  <!-- DESBORDAMIENTO (mantiene id para JS) -->
+  <div id="overflow-container" style="display:none"></div>
+
+  <!-- PRONÓSTICO -->
+  <div class="sdiv">Lluvia próximos 7 días</div>
+  <div class="forecast" id="forecast-row"></div>
+
+  <!-- FEED ALERTAS -->
+  <div class="sdiv">Últimas alertas</div>
+  <div id="feed"></div>
+
+</div>
+
+<!-- ════ TAB EN VIVO ════ -->
+<div class="tab" id="tab-live">
+  <div class="live-hdr">
+    <div class="live-title">En vivo 🔴</div>
+    <div class="live-count" id="live-count">0 activas</div>
+  </div>
+
+  <div class="filter-row">
+    <button class="fbtn active" onclick="filterLive('all',this)">Todas</button>
+    <button class="fbtn" onclick="filterLive('danger',this)">🔴 Peligro</button>
+    <button class="fbtn" onclick="filterLive('warn',this)">🟡 Precaución</button>
+    <button class="fbtn" onclick="filterLive('slide',this)">🟣 Desliz.</button>
+    <button class="fbtn" onclick="filterLive('glofas',this)">🌊 Ríos</button>
+    <button class="fbtn" onclick="filterLive('comunidad',this)">👥 Comunidad</button>
+    <button class="fbtn" onclick="filterLive('ideam',this)">🏛 IDEAM</button>
+  </div>
+
+  <div id="live-feed">
+    <div class="loading-msg"><span class="spin">⟳</span> Cargando alertas...</div>
+  </div>
+</div>
+
+<!-- ════ TAB MAPA ════ -->
+<div class="tab" id="tab-mapa">
+  <div class="map-wrap">
+    <div id="map"></div>
+    <div class="map-tools">
+      <button class="map-tool" onclick="centerOnGPS()">📡</button>
+      <button class="map-tool" onclick="toggleMapLayer()">🗺</button>
+    </div>
+    <div class="map-leg">
+      <div class="mleg-row"><div class="mleg-dot" style="background:var(--ok)"></div><span>Normal</span></div>
+      <div class="mleg-row"><div class="mleg-dot" style="background:var(--warn)"></div><span>Precaución</span></div>
+      <div class="mleg-row"><div class="mleg-dot" style="background:var(--danger)"></div><span>Peligro</span></div>
+      <div class="mleg-row"><div class="mleg-dot" style="background:var(--slide)"></div><span>Desliz.</span></div>
+    </div>
+  </div>
+  <div id="nacimientos-container-mapa"></div>
+</div>
+
+<!-- ════ TAB REPORTAR ════ -->
+<div class="tab" id="tab-reportar">
+  <div class="sdiv">Tipo de reporte</div>
+  <div class="tipo-grid">
+    <div class="tipo-btn sel" onclick="selectTipo(this,'inundacion')"><span class="tipo-ico">🌊</span>Inundación</div>
+    <div class="tipo-btn" onclick="selectTipo(this,'deslizamiento')"><span class="tipo-ico">🏔</span>Deslizamiento</div>
+    <div class="tipo-btn" onclick="selectTipo(this,'obstruccion')"><span class="tipo-ico">🪨</span>Obstrucción río</div>
+    <div class="tipo-btn" onclick="selectTipo(this,'desbordamiento')"><span class="tipo-ico">💧</span>Desbordamiento</div>
+    <div class="tipo-btn" onclick="selectTipo(this,'lluvia')"><span class="tipo-ico">⛈️</span>Lluvia extrema</div>
+    <div class="tipo-btn" onclick="selectTipo(this,'otro')"><span class="tipo-ico">📢</span>Otro</div>
+  </div>
+  <input type="hidden" id="rpt-tipo" value="inundacion">
+  <div>
+    <label class="form-lbl">Municipio / Lugar exacto</label>
+    <input class="form-input" id="rpt-lugar" placeholder="Ej: Puente Cuspatá, Cúcuta">
+    <label class="form-lbl">Río o quebrada afectada</label>
+    <select class="form-select" id="rpt-rio">
+      <option value="">No aplica / No sé</option>
+      <option>Río Pamplonita</option>
+      <option>Río Zulia</option>
+      <option>Río Táchira</option>
+      <option>Río Catatumbo</option>
+      <option>Río Sardinata</option>
+      <option>Río Algodonal</option>
+      <option>Río Peralonso</option>
+      <option>Otra quebrada</option>
+    </select>
+    <label class="form-lbl">Descripción</label>
+    <textarea class="form-textarea" id="rpt-desc" placeholder="¿Qué observas? ¿Hay personas en riesgo? ¿Hay bloqueos en el río?"></textarea>
+    <label class="form-lbl">Urgencia</label>
+    <select class="form-select" id="rpt-urgencia">
+      <option value="info">Informativo — sin riesgo inmediato</option>
+      <option value="warn">Precaución — vigilar la situación</option>
+      <option value="danger">Urgente — hay personas en riesgo</option>
+    </select>
+    <button class="form-submit" onclick="submitReport()">📡 Enviar reporte ciudadano</button>
+  </div>
+  <div class="sdiv">Emergencias</div>
+  <div class="emerg-grid">
+    <a href="tel:123" class="emerg-card"><div class="e-ico">🚨</div><div class="e-name">Emergencias</div><div class="e-num">123</div></a>
+    <a href="tel:119" class="emerg-card"><div class="e-ico">🔥</div><div class="e-name">Bomberos</div><div class="e-num">119</div></a>
+    <a href="tel:132" class="emerg-card"><div class="e-ico">🏥</div><div class="e-name">Cruz Roja</div><div class="e-num">132</div></a>
+    <a href="tel:144" class="emerg-card"><div class="e-ico">🛡️</div><div class="e-name">Defensa Civil</div><div class="e-num">144</div></a>
+  </div>
+</div>
+
+<!-- ════ TAB AJUSTES ════ -->
+<div class="tab" id="tab-ajustes">
+  <div class="sdiv">Configuración</div>
+  <div class="setting-row"><div><div class="s-label">Alertas push</div><div class="s-sub">Inundaciones y emergencias</div></div><button class="toggle on" onclick="this.classList.toggle('on')"></button></div>
+  <div class="setting-row"><div><div class="s-label">Alertas de deslizamientos</div><div class="s-sub">Notificar riesgo geológico</div></div><button class="toggle on" onclick="this.classList.toggle('on')"></button></div>
+  <div class="setting-row"><div><div class="s-label">Modo offline</div><div class="s-sub">Funciona sin internet</div></div><button class="toggle on" onclick="this.classList.toggle('on')"></button></div>
+  <div class="setting-row"><div><div class="s-label">Sonido de alerta</div><div class="s-sub">Sirena en nivel rojo</div></div><button class="toggle" onclick="this.classList.toggle('on')"></button></div>
+  <div class="setting-row"><div><div class="s-label">Ubicación automática</div><div class="s-sub">Ríos y alertas cercanas</div></div><button class="toggle" id="geo-toggle" onclick="reqGeo(this)"></button></div>
+
+  <div class="sdiv" style="margin-top:16px">Fuentes de datos</div>
+  <div id="sources-list"></div>
+
+  <div class="sdiv" style="margin-top:14px">Acerca de</div>
+  <div class="info-box">
+    <strong>AlertaRíos v2.1</strong><br>
+    Datos reales: GloFAS (Copernicus EU), Open-Meteo, IDEAM Colombia, UNGRD.<br>
+    Alertas de deslizamientos basadas en lluvia acumulada (Open-Meteo) y registros históricos UNGRD Norte de Santander.<br><br>
+    <strong>MIT License</strong> · github.com/tu-usuario/alerta-rios
+  </div>
+</div>
+
+</main>
+
+<nav class="bnav">
+  <button class="nitem active" onclick="goTab('inicio',this)" id="btn-inicio"><span class="nicon">🏠</span>Inicio</button>
+  <button class="nitem" onclick="goTab('live',this)" id="btn-live"><span class="nicon">🔴</span>En Vivo<span class="nbadge" id="live-badge" style="display:none">0</span></button>
+  <button class="nitem" onclick="goTab('mapa',this)" id="btn-mapa"><span class="nicon">🗺️</span>Mapa</button>
+  <button class="nitem" onclick="goTab('reportar',this)" id="btn-reportar"><span class="nicon">📡</span>Reportar</button>
+  <button class="nitem" onclick="goTab('ajustes',this)" id="btn-ajustes"><span class="nicon">⚙️</span>Ajustes</button>
+</nav>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ═══════════════════════════════════════════════════════
+//  MUNICIPIOS DE NORTE DE SANTANDER — centro y ríos cercanos
+// ═══════════════════════════════════════════════════════
+const MUNICIPIOS = {
+  cucuta:        { nombre:'Cúcuta',           lat:7.893, lon:-72.505, rios:['pamplonita','tachira'] },
+  villa_rosario: { nombre:'Villa del Rosario', lat:7.835, lon:-72.469, rios:['tachira','pamplonita'] },
+  los_patios:    { nombre:'Los Patios',        lat:7.927, lon:-72.490, rios:['pamplonita'] },
+  pamplona:      { nombre:'Pamplona',          lat:7.374, lon:-72.647, rios:['pamplonita','zulia'] },
+  ocana:         { nombre:'Ocaña',             lat:8.234, lon:-73.353, rios:['algodonal','catatumbo'] },
+  tibú:          { nombre:'Tibú',              lat:8.640, lon:-72.733, rios:['catatumbo','sardinata'] },
+  sardinata:     { nombre:'Sardinata',         lat:8.086, lon:-73.010, rios:['sardinata','zulia'] },
+  convencion:    { nombre:'Convención',        lat:8.472, lon:-73.321, rios:['catatumbo'] },
+  el_carmen:     { nombre:'El Carmen',         lat:8.040, lon:-73.490, rios:['zulia'] },
+  cachira:       { nombre:'Cáchira',           lat:7.742, lon:-73.043, rios:['zulia','peralonso'] },
+  abrego:        { nombre:'Ábrego',            lat:8.076, lon:-73.227, rios:['algodonal','catatumbo'] },
+};
+
+// ═══════════════════════════════════════════════════════
+//  CUENCAS
+// ═══════════════════════════════════════════════════════
+const CUENCAS = [
+  {
+    id:'pamplonita', nombre:'Río Pamplonita', color:'#ff6644',
+    nacimiento:{ lat:7.37, lon:-72.65, nombre:'Páramo del Almorzadero (2900 msnm)' },
+    desembocadura:{ lat:7.91, lon:-72.50 },
+    tramos:[ {nombre:'Alto Pamplonita',lat:7.42,lon:-72.64}, {nombre:'Pamplona',lat:7.37,lon:-72.65}, {nombre:'Cúcuta urbano',lat:7.89,lon:-72.50} ],
+    glofas_lat:7.89, glofas_lon:-72.50, glofas_lat_alto:7.37, glofas_lon_alto:-72.65,
+    umbral_warn:80, umbral_danger:150,
+    municipios_riesgo:['Cúcuta','Los Patios','Villa del Rosario','Pamplona'],
+  },
+  {
+    id:'zulia', nombre:'Río Zulia', color:'#44aaff',
+    nacimiento:{ lat:7.50, lon:-72.97, nombre:'Serranía de los Motilones (2400 msnm)' },
+    desembocadura:{ lat:8.02, lon:-72.72 },
+    tramos:[ {nombre:'Alto Zulia',lat:7.50,lon:-72.97}, {nombre:'San Calixto',lat:8.12,lon:-72.98}, {nombre:'Bajo Zulia',lat:8.25,lon:-72.85} ],
+    glofas_lat:8.12, glofas_lon:-72.98, glofas_lat_alto:7.50, glofas_lon_alto:-72.97,
+    umbral_warn:200, umbral_danger:400,
+    municipios_riesgo:['El Carmen','San Calixto','El Zulia'],
+  },
+  {
+    id:'tachira', nombre:'Río Táchira', color:'#ff4488',
+    nacimiento:{ lat:7.77, lon:-72.40, nombre:'Páramo El Zumbador, Venezuela (2800 msnm)' },
+    desembocadura:{ lat:7.86, lon:-72.40 },
+    tramos:[ {nombre:'Alto Táchira (frontera)',lat:7.77,lon:-72.40}, {nombre:'Villa del Rosario',lat:7.85,lon:-72.46} ],
+    glofas_lat:7.85, glofas_lon:-72.46, glofas_lat_alto:7.77, glofas_lon_alto:-72.40,
+    umbral_warn:60, umbral_danger:120,
+    municipios_riesgo:['Villa del Rosario','Cúcuta sur'],
+  },
+  {
+    id:'catatumbo', nombre:'Río Catatumbo', color:'#88ff44',
+    nacimiento:{ lat:9.03, lon:-73.27, nombre:'Sierra de Perijá, Venezuela (1600 msnm)' },
+    desembocadura:{ lat:9.13, lon:-73.47 },
+    tramos:[ {nombre:'Nacimiento Perijá',lat:9.03,lon:-73.27}, {nombre:'Convención',lat:8.47,lon:-73.32}, {nombre:'Tibú',lat:8.64,lon:-72.73} ],
+    glofas_lat:8.47, glofas_lon:-73.32, glofas_lat_alto:9.03, glofas_lon_alto:-73.27,
+    umbral_warn:500, umbral_danger:900,
+    municipios_riesgo:['Tibú','Convención','El Tarra','Teorama'],
+  },
+  {
+    id:'sardinata', nombre:'Río Sardinata', color:'#ffcc44',
+    nacimiento:{ lat:8.07, lon:-73.20, nombre:'Serranía de San Lucas (1800 msnm)' },
+    desembocadura:{ lat:8.10, lon:-72.78 },
+    tramos:[ {nombre:'Nacimiento San Lucas',lat:8.07,lon:-73.20}, {nombre:'Sardinata',lat:8.09,lon:-73.01} ],
+    glofas_lat:8.09, glofas_lon:-73.01, glofas_lat_alto:8.07, glofas_lon_alto:-73.20,
+    umbral_warn:120, umbral_danger:250,
+    municipios_riesgo:['Sardinata','Cúcuta norte'],
+  }
+];
+
+// ═══════════════════════════════════════════════════════
+//  ZONAS DE DESLIZAMIENTO — Norte de Santander
+//  Basado en inventario UNGRD + topografía de cuencas
+// ═══════════════════════════════════════════════════════
+const ZONAS_DESLIZAMIENTO = [
+  {
+    id:'cachira_zulia',
+    nombre:'Cáchira — Valle del Zulia',
+    lat:7.742, lon:-73.043,
+    municipio:'Cáchira',
+    rio_afectado:'zulia',
+    descripcion:'Zona de alta susceptibilidad a remoción en masa. Suelos arcillosos sobre pendientes mayores a 35°. Historial de deslizamientos en 2011, 2017 y 2021.',
+    riesgo_base:'warn',
+    umbral_lluvia_warn:40,
+    umbral_lluvia_danger:70,
+    impacto_rio:'La obstrucción del cauce puede generar embalse temporal. Si hay rotura, la ola llegaría a Sardinata en ~3h.',
+    eventos_recientes:[
+      {fecha:'2025-12', desc:'Deslizamiento sector La Vega — cierre vía al Zulia'},
+    ]
+  },
+  {
+    id:'herrán_pamplonita',
+    nombre:'Herrán — Cañón del Pamplonita',
+    lat:7.50, lon:-72.60,
+    municipio:'Herrán / Toledo',
+    rio_afectado:'pamplonita',
+    descripcion:'Cañón profundo con taludes inestables. Material rocoso fracturado y suelo residual. Zona sísmica activa (falla de Bucaramanga).',
+    riesgo_base:'ok',
+    umbral_lluvia_warn:50,
+    umbral_lluvia_danger:80,
+    impacto_rio:'Obstrucción podría elevar el nivel en Pamplona y generar inundaciones repentinas aguas abajo.',
+    eventos_recientes:[]
+  },
+  {
+    id:'abrego_algodonal',
+    nombre:'Ábrego — cuenca Algodonal',
+    lat:8.076, lon:-73.227,
+    municipio:'Ábrego',
+    rio_afectado:'catatumbo',
+    descripcion:'Ladera inestable sobre el río Algodonal (tributario del Catatumbo). Deforestación reciente aumenta el riesgo.',
+    riesgo_base:'ok',
+    umbral_lluvia_warn:45,
+    umbral_lluvia_danger:75,
+    impacto_rio:'Puede elevar sedimentación en Catatumbo, reduciendo capacidad del cauce.',
+    eventos_recientes:[]
+  },
+  {
+    id:'tib_serranía',
+    nombre:'Tibú — Serranía de los Motilones',
+    lat:8.70, lon:-72.95,
+    municipio:'Tibú',
+    rio_afectado:'catatumbo',
+    descripcion:'Vertiente occidental de la Serranía de los Motilones. Alta pluviosidad (3200mm/año). Zona de colonización reciente con deforestación activa.',
+    riesgo_base:'ok',
+    umbral_lluvia_warn:55,
+    umbral_lluvia_danger:90,
+    impacto_rio:'Tributarios directos del Catatumbo. Crecientes repentinas frecuentes.',
+    eventos_recientes:[]
+  },
+];
+
+// ═══════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════
+let state = {
+  rios:{}, weather:{}, alerts:[], liveAlerts:[],
+  lastUpdate:null, notifyOn:false,
+  map:null, mapLayer:'dark', userLat:null, userLon:null,
+  municipioActivo:'cucuta', tipoReporte:'inundacion',
+  liveFilter:'all', deslizamientos:[]
+};
+
+const SOURCES_INFO = [
+  {name:'GloFAS / Copernicus EU', desc:'Caudal de ríos (m³/s)'},
+  {name:'Open-Meteo', desc:'Precipitación y pronóstico climático'},
+  {name:'NASA POWER', desc:'Clima histórico y radiación'},
+  {name:'IDEAM Colombia', desc:'Alertas hidrológicas oficiales'},
+  {name:'UNGRD Colombia', desc:'Inventario de deslizamientos'},
+  {name:'OpenStreetMap / Leaflet', desc:'Cartografía base'},
+  {name:'IDEAM Oficial', desc:'Alertas hidrometeorológicas — Colombia'},
+];
+
+// ═══════════════════════════════════════════════════════
+//  FETCH — GloFAS
+// ═══════════════════════════════════════════════════════
+async function fetchGloFAS(lat, lon, days=7) {
+  try {
+    const r = await fetch(`https://flood-api.open-meteo.com/v1/flood?latitude=${lat}&longitude=${lon}&daily=river_discharge&forecast_days=${days}`);
+    const d = await r.json();
+    return d.daily?.river_discharge || [];
+  } catch(e) { return []; }
+}
+
+async function fetchWeather(lat, lon) {
+  try {
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=precipitation_sum,weathercode,precipitation_probability_max&hourly=precipitation&timezone=America%2FBogota&forecast_days=7`);
+    const d = await r.json();
+    return {
+      rain_daily: d.daily?.precipitation_sum || [],
+      codes: d.daily?.weathercode || [],
+      rain_prob: d.daily?.precipitation_probability_max || [],
+      hourly: d.hourly?.precipitation || []
+    };
+  } catch(e) { return {rain_daily:[],codes:[],rain_prob:[],hourly:[]}; }
+}
+
+// ═══════════════════════════════════════════════════════
+//  LOAD DATA
+// ═══════════════════════════════════════════════════════
+async function loadAllData() {
+  setLiveStatus('Cargando...', false);
+  const m = MUNICIPIOS[state.municipioActivo] || MUNICIPIOS.cucuta;
+
+  const [wx, ...discharges] = await Promise.all([
+    fetchWeather(m.lat, m.lon),
+    ...CUENCAS.map(async c => {
+      const [bajo, alto] = await Promise.all([
+        fetchGloFAS(c.glofas_lat, c.glofas_lon, 7),
+        fetchGloFAS(c.glofas_lat_alto, c.glofas_lon_alto, 7)
+      ]);
+      return {id:c.id, bajo, alto};
+    })
+  ]);
+
+  state.weather = wx;
+
+  discharges.forEach(d => {
+    const c = CUENCAS.find(x=>x.id===d.id);
+    const q=d.bajo[0]||0, qa=d.alto[0]||0, qy=d.bajo[1]||q;
+    const trend=q-qy;
+    const status=q>=c.umbral_danger?'danger':q>=c.umbral_warn?'warn':'ok';
+    const us=qa>=c.umbral_danger*.4?'danger':qa>=c.umbral_warn*.5?'warn':'ok';
+    const ttf=calcTTF(q,trend,c.umbral_danger);
+    state.rios[d.id]={q_bajo:q,q_alto:qa,q_7d:d.bajo,q_alto_7d:d.alto,trend,status,upstream_status:us,
+      pct:Math.min(100,Math.round((q/c.umbral_danger)*100)),
+      pct_alto:Math.min(100,Math.round((qa/(c.umbral_warn*.5))*100)),
+      time_to_flood:ttf};
+  });
+
+  // Eval deslizamientos con lluvia real
+  state.deslizamientos = evalDeslizamientos(wx);
+
+  buildAlerts(wx);
+  renderAll(wx);
+  state.lastUpdate=new Date();
+  setLiveStatus('Actualizado · GloFAS + Open-Meteo', true);
+
+  // ── Analytics: track system state after each data load ──
+  const dangerCount = CUENCAS.filter(c=>state.rios[c.id]?.status==='danger').length;
+  const warnCount   = CUENCAS.filter(c=>state.rios[c.id]?.status==='warn').length;
+  const slideCount  = (state.deslizamientos||[]).filter(d=>d.riesgo_actual!=='ok').length;
+  window.track?.('data_loaded', {
+    municipio:     state.municipioActivo,
+    danger_rivers: dangerCount,
+    warn_rivers:   warnCount,
+    active_slides: slideCount,
+    rain_24h:      Math.round(state.weather?.rain_daily?.[0] || 0),
+    global_level:  dangerCount > 0 ? 'danger' : warnCount > 0 ? 'warn' : 'ok',
+  });
+}
+
+function calcTTF(q,trend,thr){
+  if(trend<=0||q>=thr) return null;
+  const h=Math.round((thr-q)/Math.max(trend,0.01));
+  return h>72?null:h;
+}
+
+// ═══════════════════════════════════════════════════════
+//  EVALUAR DESLIZAMIENTOS según lluvia
+// ═══════════════════════════════════════════════════════
+function evalDeslizamientos(wx) {
+  const rain24 = wx.rain_daily?.[0]||0;
+  const rain48 = (wx.rain_daily?.[0]||0)+(wx.rain_daily?.[1]||0);
+
+  return ZONAS_DESLIZAMIENTO.map(z => {
+    let riesgo = z.riesgo_base;
+    let razon = '';
+
+    if(rain24 >= z.umbral_lluvia_danger || rain48 >= z.umbral_lluvia_danger*1.5) {
+      riesgo = 'danger';
+      razon = `Lluvia acumulada: ${rain24.toFixed(0)}mm/24h supera umbral crítico (${z.umbral_lluvia_danger}mm).`;
+    } else if(rain24 >= z.umbral_lluvia_warn || rain48 >= z.umbral_lluvia_warn*1.5) {
+      riesgo = 'warn';
+      razon = `Lluvia: ${rain24.toFixed(0)}mm/24h. Suelo saturado — riesgo elevado.`;
+    } else if(z.riesgo_base === 'warn') {
+      razon = 'Zona históricamente activa. Condiciones actuales moderadas.';
+    } else {
+      razon = 'Precipitación dentro de parámetros normales para esta zona.';
+    }
+
+    // Boost risk if river nearby is already stressed
+    const rioAfect = state.rios[z.rio_afectado];
+    if(rioAfect?.status==='danger' && riesgo!=='danger') {
+      riesgo='warn'; razon += ' ⚠️ Río tributario en nivel de alerta.';
+    }
+
+    return {...z, riesgo_actual:riesgo, razon};
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+//  BUILD ALERTS
+// ═══════════════════════════════════════════════════════
+function buildAlerts(wx) {
+  const alerts=[], liveAlerts=[];
+  const rain24=wx.rain_daily?.[0]||0;
+
+  CUENCAS.forEach(c => {
+    const r=state.rios[c.id];
+    if(!r) return;
+
+    if(r.status==='danger') {
+      const a={level:'danger',src:'glofas',src_label:'GloFAS Flood',
+        title:`🚨 ${c.nombre} — DESBORDAMIENTO PROBABLE`,
+        desc:`Caudal ${r.q_bajo.toFixed(1)} m³/s (crítico: ${c.umbral_danger}). Municipios en riesgo: ${c.municipios_riesgo.join(', ')}.`,
+        time:'Ahora',rio:c.id,categoria:'glofas',lat:c.glofas_lat,lon:c.glofas_lon};
+      alerts.push(a); liveAlerts.push(a);
+    } else if(r.status==='warn') {
+      const a={level:'warn',src:'glofas',src_label:'GloFAS / Copernicus',
+        title:`⚠️ ${c.nombre} — Precaución`,
+        desc:`Caudal ${r.q_bajo.toFixed(1)} m³/s. Umbral de alerta: ${c.umbral_warn} m³/s. Vigilar evolución.`,
+        time:'Ahora',rio:c.id,categoria:'glofas',lat:c.glofas_lat,lon:c.glofas_lon};
+      alerts.push(a); liveAlerts.push(a);
+    }
+
+    if(r.upstream_status==='danger'||r.upstream_status==='warn') {
+      const a={level:r.upstream_status,src:'glofas',src_label:'GloFAS Cuenca Alta',
+        title:`🏔 Creciente en nacimiento — ${c.nombre}`,
+        desc:`Caudal cuenca alta: ${r.q_alto.toFixed(1)} m³/s desde ${c.nacimiento.nombre}. Ola puede llegar al tramo bajo en 2–6h.`,
+        time:'Ahora',rio:c.id,categoria:'glofas',lat:c.nacimiento.lat,lon:c.nacimiento.lon};
+      alerts.push(a); liveAlerts.push(a);
+    }
+
+    if(r.time_to_flood!==null&&r.time_to_flood<=12) {
+      const a={level:r.time_to_flood<=4?'danger':'warn',src:'glofas',src_label:'GloFAS Proyección',
+        title:`⏱ ${c.nombre} podría desbordar en ~${r.time_to_flood}h`,
+        desc:`Tendencia actual: +${r.trend.toFixed(1)} m³/s·h. Umbral crítico proyectado en ${r.time_to_flood}h.`,
+        time:'Proyección',rio:c.id,categoria:'glofas'};
+      alerts.push(a); liveAlerts.push(a);
+    }
+  });
+
+  // Alertas deslizamientos
+  state.deslizamientos.forEach(z => {
+    if(z.riesgo_actual==='danger'||z.riesgo_actual==='warn') {
+      const a={level:z.riesgo_actual==='danger'?'danger':'warn',
+        src:'ungrd',src_label:'UNGRD / Geología',
+        title:`🏔 Deslizamiento — ${z.nombre}`,
+        desc:z.razon + (z.impacto_rio ? ` ${z.impacto_rio}` : ''),
+        time:'Ahora',categoria:'slide',tipo:'slide',lat:z.lat,lon:z.lon};
+      alerts.push(a); liveAlerts.push(a);
+    }
+  });
+
+  // Lluvia
+  if(rain24>=60) {
+    const a={level:'danger',src:'openmeteo',src_label:'Open-Meteo',
+      title:`🌧 Lluvia extrema — ${rain24.toFixed(0)}mm/24h`,
+      desc:`Alta probabilidad de crecientes repentinas en todos los ríos de montaña. Evitar zonas ribereñas.`,
+      time:'Pronóstico',categoria:'glofas'};
+    alerts.push(a); liveAlerts.push(a);
+  } else if(rain24>=30) {
+    const a={level:'warn',src:'openmeteo',src_label:'Open-Meteo',
+      title:`🌦 Precipitación intensa: ${rain24.toFixed(0)}mm/24h`,
+      desc:'Lluvias moderadas a fuertes. Vigilar Pamplonita y Táchira en tramos bajos.',
+      time:'Pronóstico',categoria:'glofas'};
+    alerts.push(a);
+  }
+
+  if(alerts.length===0) {
+    alerts.push({level:'ok',src:'glofas',src_label:'GloFAS + Open-Meteo',
+      title:'✅ Ríos en parámetros normales',
+      desc:`Todos los ríos monitoreados bajo umbrales de alerta. Lluvia prevista: ${rain24.toFixed(0)}mm/24h.`,
+      time:'Ahora'});
+  }
+
+  state.alerts=alerts;
+  state.liveAlerts=liveAlerts;
+
+  // Badge En Vivo
+  const cnt=liveAlerts.filter(a=>a.level==='danger'||a.level==='warn').length;
+  const badge=document.getElementById('live-badge');
+  const liveCount=document.getElementById('live-count');
+  if(cnt>0){badge.style.display='block';badge.textContent=cnt;}else{badge.style.display='none';}
+  if(liveCount) liveCount.textContent=`${cnt} activa${cnt!==1?'s':''}`;
+
+  // Banner emergencia
+  const hasDanger=alerts.some(a=>a.level==='danger');
+  const banner=document.getElementById('banner');
+  if(hasDanger){
+    const r=CUENCAS.find(c=>state.rios[c.id]?.status==='danger');
+    const ds=state.deslizamientos.find(d=>d.riesgo_actual==='danger');
+    if(r) banner.textContent=`⚠️ ALERTA ROJA — ${r.nombre} — Posible desbordamiento — Llame al 123`;
+    else if(ds) banner.textContent=`⚠️ ALERTA ROJA — Deslizamiento ${ds.nombre} — Llame al 123`;
+    banner.classList.add('show');
+  } else {
+    banner.classList.remove('show');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════════════════════
+function renderAll(wx) {
+  renderHero();
+  renderNearbyRivers();
+  renderDeslizamientos();
+  renderNacimientos();
+  renderOverflow();
+  renderForecast(wx);
+  renderFeed();
+  renderLiveFeed();
+  renderSources();
+  if(state.map) refreshMapMarkers();
+}
+
+function renderHero() {
+  const anyDanger = CUENCAS.some(c=>state.rios[c.id]?.status==='danger');
+  const anyWarn   = CUENCAS.some(c=>state.rios[c.id]?.status==='warn');
+  const anySlide  = state.deslizamientos.some(d=>d.riesgo_actual==='danger');
+  const rain24    = state.weather.rain_daily?.[0]||0;
+  const m         = MUNICIPIOS[state.municipioActivo];
+
+  const hero   = document.getElementById('main-hero');
+  const lvl    = document.getElementById('hero-level');
+  const detail = document.getElementById('hero-detail');
+  const action = document.getElementById('hero-action');
+  const hdrIco = document.getElementById('hdr-icon');
+  const hdrSts = document.getElementById('hdr-status');
+
+  document.getElementById('hero-region').textContent = m.nombre;
+
+  // Ríos en peligro para mencionar por nombre
+  const riosEnPeligro = CUENCAS.filter(c=>state.rios[c.id]?.status==='danger').map(c=>c.nombre);
+  const riosEnVigia   = CUENCAS.filter(c=>state.rios[c.id]?.status==='warn').map(c=>c.nombre);
+  const zonaSlide     = state.deslizamientos.find(d=>d.riesgo_actual==='danger');
+
+  if(anyDanger || anySlide) {
+    hero.className = 'big-status danger';
+    lvl.textContent = '🚨 PELIGRO';
+    hdrIco.className = 'logo-icon danger';
+    hdrSts.className = 'hdr-status danger';
+    hdrSts.textContent = 'ALERTA ROJA';
+
+    const rioNombre = riosEnPeligro[0] || zonaSlide?.nombre || 'un río cercano';
+    detail.innerHTML = `<strong>${rioNombre}</strong> está en nivel crítico.${rain24>=30?' Lluvia fuerte registrada.':''}`;
+    action.innerHTML = `<div class="bs-action-ico">🚨</div><div class="bs-action-txt"><strong>Aléjese de ríos y quebradas</strong>Llame al 123 si hay personas en riesgo</div>`;
+
+  } else if(anyWarn) {
+    hero.className = 'big-status warn';
+    lvl.textContent = '⚠️ PRECAUCIÓN';
+    hdrIco.className = 'logo-icon warn';
+    hdrSts.className = 'hdr-status warn';
+    hdrSts.textContent = 'Vigilancia';
+
+    const rioNombre = riosEnVigia[0] || 'algunos ríos';
+    detail.innerHTML = `<strong>${rioNombre}</strong> está subiendo de nivel.${rain24>=20?' Se esperan lluvias.':''}`;
+    action.innerHTML = `<div class="bs-action-ico">👀</div><div class="bs-action-txt"><strong>Esté atento</strong>Evite cruzar ríos. Siga las noticias locales</div>`;
+
+  } else {
+    hero.className = 'big-status ok';
+    lvl.textContent = '✅ TODO NORMAL';
+    hdrIco.className = 'logo-icon ok';
+    hdrSts.className = 'hdr-status ok';
+    hdrSts.textContent = 'Sin alertas';
+
+    detail.innerHTML = `Todos los ríos en niveles normales.${rain24>=10?` Lluvia leve: ${rain24.toFixed(0)}mm.`:' Sin lluvia significativa.'}`;
+    action.innerHTML = `<div class="bs-action-ico">✅</div><div class="bs-action-txt"><strong>Sin riesgo inmediato</strong>Actualizado hace unos momentos con datos reales</div>`;
+  }
+}
+
+function renderNearbyRivers() {
+  const grid = document.getElementById('river-grid');
+  const m = MUNICIPIOS[state.municipioActivo];
+  const sorted = [...CUENCAS].sort((a,b)=>(m.rios.includes(a.id)?0:1)-(m.rios.includes(b.id)?0:1));
+
+  grid.innerHTML = sorted.map(c=>{
+    const r = state.rios[c.id];
+    if(!r) return '';
+    const isNear = m.rios.includes(c.id);
+
+    // Texto de estado en lenguaje claro
+    const statusTxt = r.status==='danger' ? 'Nivel muy alto — alejarse'
+                    : r.status==='warn'   ? 'Nivel alto — vigilar'
+                    : 'Nivel normal';
+
+    const trendTxt = r.trend > 1   ? '↑ Subiendo rápido'
+                   : r.trend > 0.2 ? '↑ Subiendo'
+                   : r.trend < -0.2? '↓ Bajando'
+                   : '→ Estable';
+
+    return `
+    <div class="rio-item ${r.status}" onclick="showRiverDetail('${c.id}')">
+      ${isNear ? '<span class="rio-near">Cercano</span>' : ''}
+      <div class="rio-dot ${r.status}"></div>
+      <div class="rio-info">
+        <div class="rio-name">${c.nombre}</div>
+        <div class="rio-sub ${r.status}">${statusTxt} · ${trendTxt}</div>
+      </div>
+      <div class="rio-level ${r.status}">${r.status==='danger'?'PELIGRO':r.status==='warn'?'VIGILAR':'OK'}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderDeslizamientos() {
+  const cont = document.getElementById('slide-container');
+  const active = state.deslizamientos.filter(d=>d.riesgo_actual!=='ok');
+  const rain24 = state.weather.rain_daily?.[0]||0;
+
+  if(active.length===0) {
+    cont.innerHTML = `
+    <div class="slide-item ok">
+      <div class="slide-top">
+        <div class="slide-name">Sin alertas de deslizamiento</div>
+        <div class="slide-badge ok">Normal</div>
+      </div>
+      <div class="slide-desc">${ZONAS_DESLIZAMIENTO.length} zonas monitoreadas · Lluvia actual: ${rain24.toFixed(0)}mm/24h</div>
+    </div>`;
+    return;
+  }
+
+  cont.innerHTML = active.map(z=>{
+    const rio = CUENCAS.find(c=>c.id===z.rio_afectado)?.nombre || z.rio_afectado;
+    return `
+    <div class="slide-item ${z.riesgo_actual}">
+      <div class="slide-top">
+        <div class="slide-name">🏔 ${z.nombre}</div>
+        <div class="slide-badge ${z.riesgo_actual}">${z.riesgo_actual==='danger'?'Peligro':'Vigilar'}</div>
+      </div>
+      <div class="slide-desc">${z.razon} Afecta al <strong>${rio}</strong>.</div>
+    </div>`;
+  }).join('');
+}
+
+function renderNacimientos() {
+  const cont = document.getElementById('nacimientos-container');
+  // Solo mostrar los que están en warn o danger, o los cercanos al municipio activo
+  const m = MUNICIPIOS[state.municipioActivo];
+  const relevantes = CUENCAS.filter(c=>m.rios.includes(c.id)||state.rios[c.id]?.upstream_status!=='ok');
+
+  if(!relevantes.length) {
+    cont.innerHTML = `<div class="nac-card"><div class="nac-msg">Nacimientos en niveles normales para esta zona.</div></div>`;
+    return;
+  }
+
+  cont.innerHTML = relevantes.map(c=>{
+    const r = state.rios[c.id];
+    if(!r) return '';
+    const us = r.upstream_status;
+    const msg = us==='danger' ? '🚨 Creciente en el nacimiento. Puede llegar al tramo bajo en 2–6 horas.'
+              : us==='warn'   ? '⚠️ Caudal elevado en la parte alta. Vigilar.'
+              :                 '✅ Nacimiento en niveles normales.';
+    return `
+    <div class="nac-card">
+      <div class="nac-top">
+        <div>
+          <div class="nac-src">${c.nacimiento.nombre}</div>
+          <div class="nac-name">${c.nombre}</div>
+        </div>
+        <div class="nac-badge ${us}">${us==='ok'?'Normal':us==='warn'?'Vigilar':'Alerta'}</div>
+      </div>
+      <div class="nac-row">
+        <div class="nac-stat"><div class="nac-val">${r.q_alto.toFixed(0)}</div><div class="nac-lbl">m³/s arriba</div></div>
+        <div class="nac-stat"><div class="nac-val">${r.q_bajo.toFixed(0)}</div><div class="nac-lbl">m³/s abajo</div></div>
+        <div class="nac-stat"><div class="nac-val" style="color:${r.trend>0?'var(--danger)':r.trend<0?'var(--ok)':'var(--sub)'}">${r.trend>0?'↑':r.trend<0?'↓':'→'}</div><div class="nac-lbl">tendencia</div></div>
+      </div>
+      <div class="nac-msg ${us}">${msg}${r.time_to_flood?' Tiempo estimado: ~'+r.time_to_flood+'h.':''}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderOverflow() { /* merged into renderNearbyRivers */ }
+
+function renderForecast(wx) {
+  const row   = document.getElementById('forecast-row');
+  const codes = wx.codes||[], rains=wx.rain_daily||[], probs=wx.rain_prob||[];
+  const today = new Date().getDay();
+  const days  = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  row.innerHTML = Array.from({length:7},(_,i)=>{
+    const r=rains[i]||0, code=codes[i]||0, prob=probs[i]||0;
+    const ico = code<3?'☀️':code<10?'🌤️':code<50?'☁️':code<67?'🌧️':code<80?'⛈️':'🌩️';
+    const cls = r>=50?'hi':r>=25?'md':'lo';
+    const chip= r>=50?'danger':r>=25?'alert':'';
+    const lbl = i===0?'Hoy':i===1?'Mañ':days[(today+i)%7];
+    return `<div class="fday-chip ${chip}"><div class="fd-day">${lbl}</div><div class="fd-ico">${ico}</div><div class="fd-mm ${cls}">${r.toFixed(0)}mm</div><div class="fd-pct">${prob}%</div></div>`;
+  }).join('');
+}
+
+function renderFeed() {
+  const feed = document.getElementById('feed');
+  if(!feed) return;
+  feed.innerHTML = state.alerts.slice(0,8).map(a=>{
+    const src = (a.src||'').replace(/[^a-z_]/g,'');
+    return `
+    <div class="alert-item ${a.level}">
+      <div class="ai-top">
+        <span class="ai-src ${src}">${a.src_label||a.src}</span>
+        <span class="ai-time">${a.time||'Ahora'}</span>
+      </div>
+      <div class="ai-title">${a.title}</div>
+      <div class="ai-desc">${a.desc}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderLiveFeed() {
+  const feed = document.getElementById('live-feed');
+  if(!feed) return;
+  const filter = state.liveFilter;
+
+  let filtered = state.liveAlerts;
+  if(filter==='danger')    filtered = filtered.filter(a=>a.level==='danger');
+  else if(filter==='warn') filtered = filtered.filter(a=>a.level==='warn');
+  else if(filter==='slide')filtered = filtered.filter(a=>a.tipo==='slide'||a.categoria==='slide');
+  else if(filter==='glofas')filtered= filtered.filter(a=>a.src==='glofas');
+  else if(filter==='comunidad')filtered=filtered.filter(a=>a.src==='comunidad');
+  else if(filter==='ideam')filtered = filtered.filter(a=>a.src==='ideam_oficial');
+
+  if(filtered.length===0){
+    feed.innerHTML='<div class="loading-msg">Sin alertas para este filtro.</div>';
+    return;
+  }
+
+  feed.innerHTML = filtered.map(a=>{
+    const isSlide = a.tipo==='slide';
+    const cls     = isSlide?'slide':a.level;
+    const lvlTxt  = a.level==='danger'?'PELIGRO':a.level==='warn'?'PRECAUCIÓN':isSlide?'DESLIZ.':'INFO';
+    return `
+    <div class="lcard ${cls}">
+      <div class="lc-top">
+        <div class="lc-lvl ${cls}"><div class="lc-dot ${cls}"></div>${lvlTxt}</div>
+        <div class="lc-time">${a.time||'Ahora'}</div>
+      </div>
+      <div class="lc-title">${a.title}</div>
+      <div class="lc-body">${a.desc}</div>
+      <div class="lc-btns">
+        <button class="lc-btn primary" onclick="goTab('mapa',document.getElementById('btn-mapa'))">Ver en mapa</button>
+        ${a.level==='danger'?`<button class="lc-btn" onclick="window.location.href='tel:123'">📞 123</button>`:''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+
+function renderSources() {
+  const list=document.getElementById('sources-list');
+  if(!list) return;
+  list.innerHTML=SOURCES_INFO.map(s=>`
+    <div class="setting-row">
+      <div><div class="s-label">${s.name}</div><div class="s-sub">${s.desc}</div></div>
+      <div class="pulse" style="flex-shrink:0"></div>
+    </div>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+//  MAP
+// ═══════════════════════════════════════════════════════
+function initMap() {
+  if(state.map) return;
+  const m=MUNICIPIOS[state.municipioActivo];
+  state.map=L.map('map',{zoomControl:false}).setView([m.lat,m.lon],9);
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+    attribution:'© OSM © CARTO', maxZoom:18
+  }).addTo(state.map);
+
+  L.control.zoom({position:'topleft'}).addTo(state.map);
+  refreshMapMarkers();
+}
+
+function refreshMapMarkers() {
+  if(!state.map) return;
+  state.map.eachLayer(l=>{if(l instanceof L.Polyline||l instanceof L.Marker)state.map.removeLayer(l);});
+
+  // Ríos
+  CUENCAS.forEach(c=>{
+    const r=state.rios[c.id];
+    const col=r?.status==='danger'?'#f0433a':r?.status==='warn'?'#f5a623':'#22d98a';
+    L.polyline([[c.nacimiento.lat,c.nacimiento.lon],[c.desembocadura.lat,c.desembocadura.lon]],
+      {color:col,weight:3,opacity:.75,dashArray:r?.status==='danger'?'6,4':null})
+      .addTo(state.map)
+      .bindPopup(`<b style="color:${col}">${c.nombre}</b><br>Caudal: ${r?.q_bajo?.toFixed(1)||'—'} m³/s<br>Estado: ${r?.status?.toUpperCase()||'—'}`);
+
+    const ico=L.divIcon({html:`<div style="width:10px;height:10px;background:#4b9eff;border:2px solid rgba(255,255,255,.7);border-radius:50%;box-shadow:0 0 6px #4b9eff"></div>`,className:'',iconSize:[10,10],iconAnchor:[5,5]});
+    L.marker([c.nacimiento.lat,c.nacimiento.lon],{icon:ico}).addTo(state.map)
+      .bindPopup(`<b style="color:#4b9eff">Nacimiento: ${c.nombre}</b><br>${c.nacimiento.nombre}<br>${r?.q_alto?.toFixed(1)||'—'} m³/s`);
+
+    const dIco=L.divIcon({html:`<div style="width:12px;height:12px;background:${col};border:2px solid rgba(255,255,255,.6);border-radius:50%;box-shadow:0 0 8px ${col}"></div>`,className:'',iconSize:[12,12],iconAnchor:[6,6]});
+    L.marker([c.glofas_lat,c.glofas_lon],{icon:dIco}).addTo(state.map)
+      .bindPopup(`<b style="color:${col}">${c.nombre} (tramo bajo)</b><br>${r?.q_bajo?.toFixed(1)||'—'} m³/s`);
+  });
+
+  // Deslizamientos
+  state.deslizamientos.forEach(z=>{
+    if(z.riesgo_actual==='ok') return;
+    const col=z.riesgo_actual==='danger'?'#f0433a':'#c874ff';
+    const sIco=L.divIcon({html:`<div style="width:16px;height:16px;background:${col};border:2px solid rgba(255,255,255,.7);border-radius:3px;box-shadow:0 0 8px ${col};transform:rotate(45deg)"></div>`,className:'',iconSize:[16,16],iconAnchor:[8,8]});
+    L.marker([z.lat,z.lon],{icon:sIco}).addTo(state.map)
+      .bindPopup(`<b style="color:${col}">🏔 ${z.nombre}</b><br>${z.razon}`);
+  });
+
+  // User location
+  if(state.userLat) {
+    const uIco=L.divIcon({html:`<div style="width:14px;height:14px;background:#38b4ff;border:3px solid rgba(255,255,255,.9);border-radius:50%;box-shadow:0 0 12px #38b4ff"></div>`,className:'',iconSize:[14,14],iconAnchor:[7,7]});
+    L.marker([state.userLat,state.userLon],{icon:uIco}).addTo(state.map)
+      .bindPopup(`<b style="color:#38b4ff">Tu ubicación</b>`);
+  }
+}
+
+function centerOnGPS() {
+  if(state.userLat&&state.map) {
+    state.map.setView([state.userLat,state.userLon],11);
+  } else { useGPS(); }
+}
+
+function toggleMapLayer() {
+  if(!state.map) return;
+  state.map.eachLayer(l=>{if(l instanceof L.TileLayer)state.map.removeLayer(l);});
+  state.mapLayer=state.mapLayer==='dark'?'light':'dark';
+  const url=state.mapLayer==='dark'?'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png':'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  L.tileLayer(url,{attribution:'© OSM © CARTO',maxZoom:18}).addTo(state.map);
+  window.track?.('map_layer_toggled', { new_layer: state.mapLayer });
+}
+
+// ═══════════════════════════════════════════════════════
+//  LOCATION
+// ═══════════════════════════════════════════════════════
+function useGPS() {
+  if(!navigator.geolocation){alert('Tu navegador no soporta GPS.');return;}
+  window.track?.('gps_requested');
+  navigator.geolocation.getCurrentPosition(pos=>{
+    state.userLat=pos.coords.latitude;
+    state.userLon=pos.coords.longitude;
+    const nearest=findNearestMunicipio(state.userLat,state.userLon);
+    document.getElementById('loc-select').value=nearest;
+    state.municipioActivo=nearest;
+    loadAllData();
+    if(state.map) {state.map.setView([state.userLat,state.userLon],11);refreshMapMarkers();}
+    document.getElementById('geo-toggle')?.classList.add('on');
+    window.track?.('gps_success', { municipio_detected: nearest });
+  },err=>{
+    window.track?.('gps_denied');
+    alert('No se pudo obtener la ubicación. Verifica los permisos del navegador.');
+  });
+}
+
+function findNearestMunicipio(lat,lon) {
+  let nearest='cucuta', minDist=Infinity;
+  Object.entries(MUNICIPIOS).forEach(([id,m])=>{
+    const d=Math.hypot(lat-m.lat,lon-m.lon);
+    if(d<minDist){minDist=d;nearest=id;}
+  });
+  return nearest;
+}
+
+function onMunicipioChange(val) {
+  state.municipioActivo=val;
+  const m=MUNICIPIOS[val];
+  if(state.map) state.map.setView([m.lat,m.lon],9);
+  loadAllData();
+  window.track?.('municipio_changed', { municipio: val });
+}
+
+// ═══════════════════════════════════════════════════════
+//  UI HELPERS
+// ═══════════════════════════════════════════════════════
+function goTab(tab,btn) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.nitem').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+tab).classList.add('active');
+  btn.classList.add('active');
+  if(tab==='mapa') setTimeout(initMap,80);
+  if(tab==='live') renderLiveFeed();
+  window.scrollTo(0,0);
+  window.track?.('tab_view', { tab_name: tab });
+}
+
+function filterLive(type,btn) {
+  state.liveFilter=type;
+  document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderLiveFeed();
+  window.track?.('live_filter_used', { filter_type: type });
+}
+
+function setLiveStatus(msg,ok) {
+  document.getElementById('live-txt').textContent=msg;
+  document.getElementById('live-dot').className='pulse'+(ok?'':' err');
+}
+
+async function toggleNotify() {
+  const btn=document.getElementById('notify-btn');
+  if(state.notifyOn){
+    state.notifyOn=false;btn.className='notify-btn';
+    btn.innerHTML='🔔 Activar alertas push';return;
+  }
+  if(!('Notification' in window)){alert('Tu navegador no soporta notificaciones.');return;}
+  btn.innerHTML='⏳ Activando...';btn.disabled=true;
+  const p=await Notification.requestPermission();
+  if(p==='granted'){
+    const ok=window.registerFCMToken ? await window.registerFCMToken() : false;
+    state.notifyOn=true;
+    btn.className='notify-btn on';
+    btn.innerHTML='✅ Alertas push activas';
+    btn.disabled=false;
+    if(window.showToast) window.showToast('AlertaRíos activado 🌊','Recibirás alertas de inundaciones y deslizamientos.','ok');
+    window.track?.('push_notifications_enabled', { fcm_registered: ok });
+  } else {
+    btn.innerHTML='🔔 Activar alertas push';
+    btn.disabled=false;
+    window.track?.('push_notifications_denied');
+    alert('Debes permitir las notificaciones para recibir alertas.');
+  }
+}
+
+function reqGeo(btn) {
+  navigator.geolocation?.getCurrentPosition(()=>btn.classList.add('on'),()=>alert('Activa la ubicación en ajustes del navegador.'));
+}
+
+function selectTipo(el,tipo) {
+  document.querySelectorAll('.tipo-btn').forEach(b=>b.classList.remove('sel'));
+  el.classList.add('sel');
+  state.tipoReporte=tipo;
+  document.getElementById('rpt-tipo').value=tipo;
+}
+
+function showRiverDetail(id) {
+  const c=CUENCAS.find(x=>x.id===id);
+  const r=state.rios[id];
+  if(!c||!r) return;
+  window.track?.('river_detail_viewed', { rio_id: id, rio_status: r.status, q_bajo: Math.round(r.q_bajo) });
+  alert([
+    `${c.nombre}`,`Nacimiento: ${c.nacimiento.nombre}`,
+    `────────────────────`,
+    `Caudal cuenca alta: ${r.q_alto.toFixed(1)} m³/s`,
+    `Caudal tramo bajo: ${r.q_bajo.toFixed(1)} m³/s`,
+    `Tendencia: ${r.trend>0?'↑ Subiendo':r.trend<0?'↓ Bajando':'→ Estable'} ${Math.abs(r.trend).toFixed(1)} m³/s·h`,
+    `────────────────────`,
+    `Umbral precaución: ${c.umbral_warn} m³/s`,
+    `Umbral crítico: ${c.umbral_danger} m³/s`,
+    `Estado: ${r.status.toUpperCase()}`,
+    r.time_to_flood?`⏱ Tiempo al umbral crítico: ~${r.time_to_flood}h`:'',
+    `────────────────────`,
+    `Municipios en riesgo: ${c.municipios_riesgo.join(', ')}`,
+    `Fuente: GloFAS / Copernicus EU`
+  ].filter(Boolean).join('\n'));
+}
+
+async function submitReport() {
+  const tipo=document.getElementById('rpt-tipo').value;
+  const lugar=document.getElementById('rpt-lugar').value;
+  const rio=document.getElementById('rpt-rio').value;
+  const desc=document.getElementById('rpt-desc').value;
+  const urgencia=document.getElementById('rpt-urgencia').value;
+  if(!lugar||!desc){alert('Completa el lugar y la descripción.');return;}
+
+  const tipoLabels={inundacion:'🌊 Inundación',deslizamiento:'🏔 Deslizamiento',obstruccion:'🪨 Obstrucción',desbordamiento:'💧 Desbordamiento',lluvia:'⛈️ Lluvia extrema',otro:'📢 Aviso'};
+  const newAlert={
+    level:urgencia, src:'comunidad', src_label:'Reporte ciudadano',
+    title:`${tipoLabels[tipo]||'📍 Reporte'} en ${lugar}`,
+    desc:desc+(rio?` Río: ${rio}.`:''),
+    time:'Ahora', categoria:'comunidad',
+    tipo:tipo==='deslizamiento'?'slide':undefined
+  };
+
+  // Guardar en Firestore (visible para todos en tiempo real)
+  const saved = window.submitToFirestore
+    ? await window.submitToFirestore({
+        level:urgencia, tipo, lugar, rio_id:rio||null,
+        title: newAlert.title, body: newAlert.desc,
+      })
+    : false;
+  window.track?.('citizen_report_submitted', {
+    tipo, urgencia,
+    has_rio: !!rio,
+    municipio: state.municipioActivo,
+    saved_to_firebase: saved,
+  });
+
+  // También mostrar localmente de inmediato
+  state.alerts.unshift(newAlert);
+  state.liveAlerts.unshift(newAlert);
+  renderFeed(); renderLiveFeed();
+
+  ['rpt-lugar','rpt-desc'].forEach(id=>{document.getElementById(id).value='';});
+  const msg = saved
+    ? '✅ Reporte enviado a Firebase. Todos los usuarios lo verán en tiempo real.'
+    : '✅ Reporte visible localmente. Conéctate a internet para compartirlo.';
+  if(window.showToast) window.showToast('Reporte enviado 📡', msg, 'ok');
+  else alert(msg);
+  goTab('live',document.getElementById('btn-live'));
+}
+
+// ═══════════════════════════════════════════════════════
+//  INIT — exponer state globalmente para Firebase module
+// ═══════════════════════════════════════════════════════
+window.state = state;
+window.renderFeed = renderFeed;
+window.renderLiveFeed = renderLiveFeed;
+window.renderDeslizamientos = renderDeslizamientos;
+
+// Track emergency banner shown
+const origBuildAlerts = buildAlerts;
+buildAlerts = function(wx) {
+  origBuildAlerts(wx);
+  const hasDanger = document.getElementById('banner')?.classList.contains('show');
+  if(hasDanger) window.track?.('emergency_banner_shown', { municipio: state.municipioActivo });
+};
+
+// Try GPS first, fall back to Cúcuta
+if(navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(pos=>{
+    state.userLat=pos.coords.latitude;
+    state.userLon=pos.coords.longitude;
+    const nearest=findNearestMunicipio(state.userLat,state.userLon);
+    document.getElementById('loc-select').value=nearest;
+    state.municipioActivo=nearest;
+    loadAllData();
+  },()=>loadAllData(),{timeout:3000});
+} else {
+  loadAllData();
+}
+
+setInterval(loadAllData,30*60*1000);
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>

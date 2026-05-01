@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Alertas oficiales ──────────────────────────────
+    // Lectura pública. Escritura solo desde Admin SDK (Functions).
+    match /alerts/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Estado de ríos ─────────────────────────────────
+    // Lectura pública. Solo Functions escribe.
+    match /rivers_status/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Estado de deslizamientos ───────────────────────
+    // Nueva colección v2.1. Misma política que rivers_status.
+    match /landslide_status/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── Reportes ciudadanos ────────────────────────────
+    // Lectura pública. Creación pública con validación de campos.
+    // No se permite editar ni borrar desde el cliente.
+    match /reports/{doc} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['tipo', 'lugar', 'desc', 'urgencia', 'timestamp'])
+                    && request.resource.data.desc.size() < 500
+                    && request.resource.data.lugar.size() < 200;
+      allow update, delete: if false;
+    }
+
+    // ── Tokens FCM ─────────────────────────────────────
+    // El cliente solo puede escribir su propio token (path = token).
+    // No puede leer ni borrar tokens ajenos.
+    // La limpieza de tokens inválidos la hace Functions con Admin SDK.
+    match /fcm_tokens/{token} {
+      allow read: if false;
+      allow create, update: if request.resource.data.token == token
+                            && request.resource.data.token is string
+                            && request.resource.data.token.size() > 10;
+      allow delete: if false;
+    }
+
+  }
+}

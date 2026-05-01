@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#080e1a">
+<meta name="description" content="Estado en tiempo real del sistema AlertaRíos — Norte de Santander, Colombia">
+<meta property="og:title" content="AlertaRíos — Estado del sistema">
+<meta property="og:description" content="Estado en tiempo real de ríos, deslizamientos y alertas en Norte de Santander.">
+<title>AlertaRíos — Estado del sistema</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:     #080e1a;
+  --bg1:    #0d1525;
+  --bg2:    #111d30;
+  --border: rgba(255,255,255,0.07);
+  --text:   #dce8f5;
+  --muted:  #5e7a98;
+  --muted2: #8aacc8;
+  --accent: #38b4ff;
+  --ok:     #22d98a;
+  --warn:   #f5a623;
+  --danger: #f0433a;
+  --slide:  #c874ff;
+  --ideam:  #22d98a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Space Grotesk',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 60% 40% at 20% 100%,rgba(0,100,220,0.07) 0%,transparent 60%);pointer-events:none}
+
+/* ── HEADER ── */
+.hdr{border-bottom:1px solid var(--border);padding:0 24px}
+.hdr-inner{max-width:860px;margin:0 auto;height:56px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--text)}
+.logo-icon{width:32px;height:32px;background:linear-gradient(140deg,#006bce,#38b4ff);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.logo-text{font-size:15px;font-weight:700}
+.logo-text span{color:var(--accent)}
+.hdr-right{display:flex;align-items:center;gap:10px}
+.sys-pill{display:flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:5px 12px;font-size:11px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.dot.warn{background:var(--warn)}
+.dot.danger{background:var(--danger);animation:pulse 1s infinite}
+.dot.loading{background:var(--muted);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.app-link{background:var(--accent);color:#080e1a;border:none;border-radius:7px;padding:6px 14px;font-size:11px;font-weight:700;font-family:'Space Grotesk',sans-serif;cursor:pointer;text-decoration:none}
+
+/* ── MAIN ── */
+main{max-width:860px;margin:0 auto;padding:28px 20px 60px}
+
+/* ── HERO STATUS ── */
+.status-hero{border-radius:14px;border:1px solid var(--border);padding:28px;margin-bottom:20px;position:relative;overflow:hidden}
+.status-hero::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--ok);transition:background .5s}
+.status-hero.warn::before{background:var(--warn)}
+.status-hero.danger::before{background:var(--danger);animation:flash 1s infinite}
+.status-hero.loading::before{background:var(--muted);animation:flash 2s infinite}
+@keyframes flash{0%,100%{opacity:1}50%{opacity:.2}}
+.sh-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+.sh-label{font-size:10px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);font-weight:600;margin-bottom:6px}
+.sh-level{font-size:32px;font-weight:700;letter-spacing:-.5px;color:var(--ok)}
+.sh-level.warn{color:var(--warn)}
+.sh-level.danger{color:var(--danger)}
+.sh-level.loading{color:var(--muted)}
+.sh-badge{padding:7px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;border:1px solid var(--ok);color:var(--ok);background:rgba(34,217,138,.1);align-self:flex-start}
+.sh-badge.warn{border-color:var(--warn);color:var(--warn);background:rgba(245,166,35,.1)}
+.sh-badge.danger{border-color:var(--danger);color:var(--danger);background:rgba(240,67,58,.1);animation:pulse 1s infinite}
+.sh-meta{display:flex;gap:20px;flex-wrap:wrap}
+.sh-meta-item{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.sh-meta-item strong{color:var(--muted2)}
+
+/* ── SECTION ── */
+.stitle{font-size:10px;text-transform:uppercase;letter-spacing:1.6px;color:var(--muted);font-weight:600;margin:24px 0 10px;display:flex;align-items:center;gap:8px}
+.stitle::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* ── RIVER GRID ── */
+.river-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:4px}
+.rcard{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:14px;position:relative;overflow:hidden}
+.rcard::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px}
+.rcard.ok::after{background:var(--ok)}
+.rcard.warn::after{background:var(--warn)}
+.rcard.danger::after{background:var(--danger);animation:flash .9s infinite}
+.rcard.danger{border-color:rgba(240,67,58,.3)}
+.rcard.warn{border-color:rgba(245,166,35,.25)}
+.rc-name{font-size:13px;font-weight:700;margin-bottom:2px}
+.rc-sub{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px}
+.rc-q{font-family:'Space Mono',monospace;font-size:22px;font-weight:700;line-height:1}
+.rc-q.ok{color:var(--ok)}.rc-q.warn{color:var(--warn)}.rc-q.danger{color:var(--danger)}
+.rc-unit{font-size:9px;color:var(--muted);margin:2px 0 8px}
+.rc-bar{height:4px;background:rgba(255,255,255,.05);border-radius:2px;overflow:hidden;margin-bottom:6px}
+.rc-bar-fill{height:100%;border-radius:2px;transition:width 1s}
+.rc-stats{display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+.rc-stats strong{color:var(--muted2)}
+
+/* ── LANDSLIDE LIST ── */
+.sl-row{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px;position:relative;overflow:hidden}
+.sl-row::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px}
+.sl-row.ok::before{background:var(--ok)}
+.sl-row.warn::before{background:var(--warn)}
+.sl-row.danger::before{background:var(--danger)}
+.sl-ico{font-size:20px;flex-shrink:0}
+.sl-info{flex:1;min-width:0}
+.sl-name{font-size:12px;font-weight:700}
+.sl-detail{font-size:10px;color:var(--muted);margin-top:2px;line-height:1.5}
+.sl-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:3px 9px;border-radius:10px;flex-shrink:0}
+.sl-badge.ok{background:rgba(34,217,138,.1);color:var(--ok);border:1px solid rgba(34,217,138,.2)}
+.sl-badge.warn{background:rgba(245,166,35,.1);color:var(--warn);border:1px solid rgba(245,166,35,.2)}
+.sl-badge.danger{background:rgba(240,67,58,.1);color:var(--danger);border:1px solid rgba(240,67,58,.2)}
+
+/* ── ALERTS FEED ── */
+.alert-row{background:var(--bg1);border:1px solid var(--border);border-left:2px solid var(--ok);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+.alert-row.warn{border-left-color:var(--warn);background:rgba(245,166,35,.05)}
+.alert-row.danger{border-left-color:var(--danger);background:rgba(240,67,58,.06)}
+.alert-row.ideam{border-left-color:var(--ideam)}
+.ar-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px;flex-wrap:wrap}
+.ar-src{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}
+.ar-src.glofas{color:#a07aff}
+.ar-src.ideam{color:var(--ideam)}
+.ar-src.ungrd{color:#ff9940}
+.ar-src.open-meteo{color:var(--accent)}
+.ar-src.comunidad{color:var(--warn)}
+.ar-time{font-size:9px;color:var(--muted);font-family:'Space Mono',monospace;flex-shrink:0}
+.ar-title{font-size:12px;font-weight:600;color:var(--text);line-height:1.4;margin-bottom:2px}
+.ar-desc{font-size:10px;color:var(--muted2);line-height:1.55}
+
+/* ── API BLOCK ── */
+.api-card{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:10px}
+.api-url{font-family:'Space Mono',monospace;font-size:11px;color:var(--accent);background:var(--bg2);border-radius:6px;padding:8px 12px;margin:8px 0;word-break:break-all;cursor:pointer;border:1px solid var(--border)}
+.api-url:hover{border-color:var(--accent)}
+.api-desc{font-size:11px;color:var(--muted2);line-height:1.6;margin-bottom:6px}
+.api-copy-hint{font-size:9px;color:var(--muted);margin-top:4px}
+
+/* ── SOURCES ── */
+.src-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.src-card{background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:12px}
+.src-name{font-size:11px;font-weight:700;color:var(--text);margin-bottom:3px}
+.src-desc{font-size:10px;color:var(--muted);line-height:1.5}
+.src-status{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--muted);margin-top:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+
+/* ── FOOTER ── */
+footer{border-top:1px solid var(--border);padding:20px 24px;text-align:center;font-size:10px;color:var(--muted);line-height:1.8}
+footer a{color:var(--accent);text-decoration:none}
+
+/* ── LOADER / SKELETON ── */
+.skeleton{background:linear-gradient(90deg,var(--bg2) 25%,var(--bg1) 50%,var(--bg2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px;height:14px;width:100%}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.load-txt{text-align:center;color:var(--muted);font-size:12px;padding:20px}
+
+/* ── REFRESH ── */
+.refresh-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding:10px 14px;background:var(--bg1);border:1px solid var(--border);border-radius:10px}
+.rb-left{font-size:11px;color:var(--muted)}
+.rb-left strong{color:var(--muted2)}
+.rb-btn{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:11px;font-weight:600;color:var(--muted2);cursor:pointer;font-family:'Space Grotesk',sans-serif}
+.rb-btn:hover{border-color:var(--accent);color:var(--accent)}
+.rb-btn:active{opacity:.7}
+
+/* ── RESPONSIVE ── */
+@media(max-width:520px){
+  main{padding:16px 12px 50px}
+  .sh-level{font-size:26px}
+  .river-grid{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-inner">
+    <a class="logo" href="/">
+      <div class="logo-icon">🌊</div>
+      <div class="logo-text">Alerta<span>Ríos</span> <span style="color:var(--muted);font-weight:400;font-size:12px">/ estado</span></div>
+    </a>
+    <div class="hdr-right">
+      <div class="sys-pill">
+        <div class="dot loading" id="sys-dot"></div>
+        <span id="sys-txt">Cargando...</span>
+      </div>
+      <a class="app-link" href="/">Abrir app →</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- HERO -->
+  <div class="status-hero loading" id="status-hero">
+    <div class="sh-top">
+      <div>
+        <div class="sh-label">Estado actual — Norte de Santander</div>
+        <div class="sh-level loading" id="sh-level">Consultando...</div>
+      </div>
+      <div class="sh-badge" id="sh-badge">—</div>
+    </div>
+    <div class="sh-meta" id="sh-meta">
+      <div class="sh-meta-item"><span class="skeleton" style="width:180px"></span></div>
+    </div>
+  </div>
+
+  <!-- REFRESH BAR -->
+  <div class="refresh-bar">
+    <div class="rb-left">Última actualización: <strong id="last-update">—</strong> · Datos: GloFAS + Open-Meteo + IDEAM</div>
+    <button class="rb-btn" onclick="loadStatus()">⟳ Actualizar</button>
+  </div>
+
+  <!-- RÍOS -->
+  <div class="stitle">🏞 Estado de ríos monitoreados</div>
+  <div class="river-grid" id="river-grid">
+    <div class="load-txt" style="grid-column:1/-1"><span style="animation:shimmer 1s infinite">⟳</span> Cargando datos GloFAS...</div>
+  </div>
+
+  <!-- DESLIZAMIENTOS -->
+  <div class="stitle">🏔 Zonas de deslizamiento</div>
+  <div id="slide-list">
+    <div class="load-txt">⟳ Evaluando riesgo geológico...</div>
+  </div>
+
+  <!-- ALERTAS ACTIVAS -->
+  <div class="stitle">📡 Alertas recientes</div>
+  <div id="alerts-feed">
+    <div class="load-txt">⟳ Cargando alertas...</div>
+  </div>
+
+  <!-- API PÚBLICA -->
+  <div class="stitle">🔌 API pública — integración externa</div>
+  <div class="api-card">
+    <div class="api-desc">
+      Endpoint JSON abierto para integrar datos de AlertaRíos en otros sistemas.
+      Sin autenticación. Devuelve estado de ríos, deslizamientos y últimas 30 alertas.
+    </div>
+    <div class="api-url" onclick="copyURL(this)" id="api-url-status">
+      https://TU_PROYECTO.web.app/api/status
+    </div>
+    <div class="api-copy-hint">Haz clic para copiar · Responde en &lt;2s · CORS abierto</div>
+  </div>
+  <div class="api-card">
+    <div class="api-desc">
+      Solo alertas del IDEAM, filtradas para Norte de Santander.
+    </div>
+    <div class="api-url" onclick="copyURL(this)" id="api-url-ideam">
+      https://TU_PROYECTO.web.app/api/ideam-alerts
+    </div>
+    <div class="api-copy-hint">Haz clic para copiar</div>
+  </div>
+
+  <!-- FUENTES -->
+  <div class="stitle">📊 Fuentes de datos</div>
+  <div class="src-grid" id="src-grid"></div>
+
+</main>
+
+<footer>
+  <strong style="color:var(--muted2)">AlertaRíos v2.1</strong> — Sistema de alerta temprana, Norte de Santander, Colombia.<br>
+  Datos: <a href="https://flood-api.open-meteo.com" target="_blank">GloFAS / Copernicus EU</a> ·
+  <a href="https://open-meteo.com" target="_blank">Open-Meteo</a> ·
+  <a href="http://www.ideam.gov.co" target="_blank">IDEAM Colombia</a> ·
+  <a href="https://portal.gestiondelriesgo.gov.co" target="_blank">UNGRD</a><br>
+  <a href="/">← Volver a la app</a> · MIT License · Uso libre para el bien común
+</footer>
+
+<script>
+// ── CONFIG ─────────────────────────────────────────
+// El endpoint /api/status viene del firebase.json rewrite → Cloud Function getStatus
+const API_BASE = window.location.origin;
+const STATUS_URL = `${API_BASE}/api/status`;
+
+// Cuencas para mostrar nombre y umbrales (no depende de Firebase)
+const CUENCAS = [
+  {id:'pamplonita', nombre:'Río Pamplonita', umbral_warn:80,  umbral_danger:150},
+  {id:'zulia',      nombre:'Río Zulia',      umbral_warn:200, umbral_danger:400},
+  {id:'tachira',    nombre:'Río Táchira',    umbral_warn:60,  umbral_danger:120},
+  {id:'catatumbo',  nombre:'Río Catatumbo',  umbral_warn:500, umbral_danger:900},
+  {id:'sardinata',  nombre:'Río Sardinata',  umbral_warn:120, umbral_danger:250},
+];
+
+const SLIDE_NOMBRES = {
+  cachira_zulia:      'Cáchira — Valle del Zulia',
+  herran_pamplonita:  'Herrán — Cañón del Pamplonita',
+  abrego_algodonal:   'Ábrego — Cuenca Algodonal',
+  tibu_serrania:      'Tibú — Serranía Motilones',
+};
+
+const SOURCES = [
+  {name:'GloFAS / Copernicus EU', desc:'Caudal de ríos en tiempo real', icon:'🌊'},
+  {name:'Open-Meteo',             desc:'Precipitación y pronóstico',     icon:'🌧'},
+  {name:'IDEAM Colombia',         desc:'Alertas hidrometeorológicas',    icon:'🏛'},
+  {name:'UNGRD Colombia',         desc:'Inventario deslizamientos',      icon:'🏔'},
+  {name:'Firebase Firestore',     desc:'Base de datos en tiempo real',   icon:'🔥'},
+  {name:'Cloud Functions',        desc:'Chequeo automático cada 30 min', icon:'⚙️'},
+];
+
+// ── LOAD STATUS ─────────────────────────────────────
+async function loadStatus() {
+  setSys('loading', 'Actualizando...');
+  try {
+    const r = await fetch(STATUS_URL);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    renderAll(data);
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString('es-CO');
+    setSys('ok', 'Operativo');
+  } catch (e) {
+    console.error('Status fetch error:', e);
+    setSys('danger', 'Error al cargar');
+    document.getElementById('status-hero').className = 'status-hero warn';
+    document.getElementById('sh-level').textContent = 'Sin conexión';
+    document.getElementById('sh-badge').textContent = '⚠️ Sin datos';
+  }
+}
+
+// ── RENDER ──────────────────────────────────────────
+function renderAll(data) {
+  const { rivers = {}, landslides = {}, alerts = [] } = data;
+
+  // Hero global
+  const statuses = CUENCAS.map(c => rivers[c.id]?.status || 'ok');
+  const slideStatuses = Object.values(landslides).map(z => z.riesgo || 'ok');
+  const allStatuses = [...statuses, ...slideStatuses];
+  const globalLevel = allStatuses.includes('danger') ? 'danger'
+                    : allStatuses.includes('warn')   ? 'warn' : 'ok';
+
+  const hero  = document.getElementById('status-hero');
+  const level = document.getElementById('sh-level');
+  const badge = document.getElementById('sh-badge');
+  const meta  = document.getElementById('sh-meta');
+
+  hero.className  = `status-hero ${globalLevel}`;
+  level.className = `sh-level ${globalLevel}`;
+  badge.className = `sh-badge ${globalLevel}`;
+
+  const labels = {
+    ok:     ['NORMAL', '🟢 Sin alertas activas'],
+    warn:   ['PRECAUCIÓN', '🟡 Vigilancia activa'],
+    danger: ['EMERGENCIA', '🔴 Alerta máxima'],
+  };
+  level.textContent = labels[globalLevel][0];
+  badge.textContent = labels[globalLevel][1];
+
+  const dangerRios  = CUENCAS.filter(c => rivers[c.id]?.status === 'danger').map(c => c.nombre);
+  const warnRios    = CUENCAS.filter(c => rivers[c.id]?.status === 'warn').map(c => c.nombre);
+  const activeSlide = Object.entries(landslides).filter(([,z]) => z.riesgo !== 'ok');
+
+  meta.innerHTML = [
+    `<div class="sh-meta-item">🏞 <strong>${CUENCAS.length} ríos</strong> monitoreados</div>`,
+    dangerRios.length  ? `<div class="sh-meta-item" style="color:var(--danger)">🚨 ${dangerRios.join(', ')}</div>` : '',
+    warnRios.length    ? `<div class="sh-meta-item" style="color:var(--warn)">⚠️ ${warnRios.join(', ')}</div>` : '',
+    activeSlide.length ? `<div class="sh-meta-item" style="color:var(--slide)">🏔 ${activeSlide.length} zona(s) deslizamiento</div>` : '',
+    `<div class="sh-meta-item">📡 <strong>${alerts.length}</strong> alertas en registro</div>`,
+  ].filter(Boolean).join('');
+
+  renderRivers(rivers);
+  renderSlides(landslides);
+  renderAlerts(alerts);
+  renderSources();
+}
+
+function renderRivers(rivers) {
+  const grid = document.getElementById('river-grid');
+  grid.innerHTML = CUENCAS.map(c => {
+    const r = rivers[c.id];
+    if (!r) return `<div class="rcard"><div class="rc-name">${c.nombre}</div><div class="rc-sub">Sin datos</div></div>`;
+    const pct = Math.min(100, Math.round((r.q_bajo / c.umbral_danger) * 100));
+    const barColor = pct >= 100 ? 'var(--danger)' : pct >= 55 ? 'var(--warn)' : 'var(--ok)';
+    const trend = r.trend > 0.5 ? '↑ Subiendo' : r.trend < -0.5 ? '↓ Bajando' : '→ Estable';
+    const trendColor = r.trend > 0.5 ? 'var(--danger)' : r.trend < -0.5 ? 'var(--ok)' : 'var(--muted)';
+    return `
+    <div class="rcard ${r.status}">
+      <div class="rc-name">${c.nombre}</div>
+      <div class="rc-sub">${r.status === 'danger' ? '🚨 Crítico' : r.status === 'warn' ? '⚠️ Vigilar' : '✅ Normal'}</div>
+      <div class="rc-q ${r.status}">${(r.q_bajo||0).toFixed(1)}</div>
+      <div class="rc-unit">m³/s · ${pct}% del umbral crítico</div>
+      <div class="rc-bar"><div class="rc-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
+      <div class="rc-stats">
+        <span>Umbral: <strong>${c.umbral_danger} m³/s</strong></span>
+        <span style="color:${trendColor}">${trend}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSlides(landslides) {
+  const list = document.getElementById('slide-list');
+  const entries = Object.entries(landslides);
+  if (!entries.length) {
+    list.innerHTML = '<div class="load-txt">Sin datos de deslizamientos.</div>';
+    return;
+  }
+  list.innerHTML = entries.map(([id, z]) => {
+    const nombre = SLIDE_NOMBRES[id] || id;
+    const ico = z.riesgo === 'danger' ? '🔴' : z.riesgo === 'warn' ? '🟡' : '🟢';
+    const badgeTxt = z.riesgo === 'danger' ? 'PELIGRO' : z.riesgo === 'warn' ? 'VIGILAR' : 'NORMAL';
+    return `
+    <div class="sl-row ${z.riesgo || 'ok'}">
+      <div class="sl-ico">${ico}</div>
+      <div class="sl-info">
+        <div class="sl-name">${nombre}</div>
+        <div class="sl-detail">
+          ${z.razon || ''}
+          ${z.rain24 != null ? ` · Lluvia: ${z.rain24.toFixed(0)}mm/24h` : ''}
+          ${z.municipio ? ` · ${z.municipio}` : ''}
+        </div>
+      </div>
+      <div class="sl-badge ${z.riesgo || 'ok'}">${badgeTxt}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderAlerts(alerts) {
+  const feed = document.getElementById('alerts-feed');
+  if (!alerts.length) {
+    feed.innerHTML = '<div class="load-txt">Sin alertas recientes.</div>';
+    return;
+  }
+  feed.innerHTML = alerts.slice(0, 12).map(a => {
+    const src = (a.source || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    const srcShort = a.source === 'IDEAM Oficial' ? 'IDEAM' :
+                     a.source?.includes('GloFAS') ? 'GloFAS' :
+                     a.source?.includes('Open-Meteo') ? 'Open-Meteo' :
+                     a.source || 'Sistema';
+    const time = a.timestamp?._seconds
+      ? timeAgo(new Date(a.timestamp._seconds * 1000))
+      : 'Reciente';
+    const levelCls = a.level === 'ideam' ? 'ideam' : (a.level || 'ok');
+    return `
+    <div class="alert-row ${levelCls}">
+      <div class="ar-top">
+        <span class="ar-src ${src}">${srcShort}</span>
+        <span class="ar-time">${time}</span>
+      </div>
+      <div class="ar-title">${a.title || ''}</div>
+      <div class="ar-desc">${(a.body || a.desc || '').slice(0, 200)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderSources() {
+  const grid = document.getElementById('src-grid');
+  grid.innerHTML = SOURCES.map(s => `
+    <div class="src-card">
+      <div class="src-name">${s.icon} ${s.name}</div>
+      <div class="src-desc">${s.desc}</div>
+      <div class="src-status"><div class="dot ok"></div>Activo</div>
+    </div>`).join('');
+}
+
+// ── HELPERS ─────────────────────────────────────────
+function setSys(level, txt) {
+  const dot = document.getElementById('sys-dot');
+  const lbl = document.getElementById('sys-txt');
+  dot.className = `dot ${level}`;
+  lbl.textContent = txt;
+}
+
+function timeAgo(date) {
+  const s = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (s < 60)    return 'Ahora';
+  if (s < 3600)  return `hace ${Math.floor(s/60)}min`;
+  if (s < 86400) return `hace ${Math.floor(s/3600)}h`;
+  return `hace ${Math.floor(s/86400)}d`;
+}
+
+function copyURL(el) {
+  const txt = el.textContent.trim();
+  navigator.clipboard?.writeText(txt).then(() => {
+    const orig = el.textContent;
+    el.textContent = '✅ Copiado';
+    setTimeout(() => { el.textContent = orig; }, 1500);
+  });
+}
+
+// Inyectar URLs reales basadas en el origin actual
+function setAPIURLs() {
+  const base = window.location.origin;
+  document.getElementById('api-url-status').textContent = `${base}/api/status`;
+  document.getElementById('api-url-ideam').textContent  = `${base}/api/ideam-alerts`;
+}
+
+// ── INIT ────────────────────────────────────────────
+setAPIURLs();
+loadStatus();
+// Auto-refresh cada 5 minutos
+setInterval(loadStatus, 5 * 60 * 1000);
+</script>
+</body>
+</html>
