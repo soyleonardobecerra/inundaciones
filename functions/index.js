@@ -157,24 +157,29 @@ async function getWeatherAt(lat, lon) {
 function evalLandslideRisk(zona, rain24, rain48, prevRiesgo, riverStatus) {
   if (rain24 == null || rain48 == null) {
     return {
-      riesgo: prevRiesgo || zona.riesgo_base || 'unknown',
+      riesgo: prevRiesgo === 'danger' || prevRiesgo === 'warn' ? prevRiesgo : 'unknown',
+      estado: 'sin_datos',
       razon: 'Fuente de lluvia no disponible. Mantener vigilancia y consultar fuentes oficiales.',
       empeoró: false,
     };
   }
 
-  let riesgo = zona.riesgo_base;
+  let riesgo = 'ok';
+  let estado = 'normal';
   let razon = '';
 
   if (rain24 >= zona.umbral_danger || rain48 >= zona.umbral_danger_48h) {
     riesgo = 'danger';
+    estado = 'alerta_actual';
     razon = `Lluvia crítica: ${rain24.toFixed(0)}mm/24h o ${rain48.toFixed(0)}mm/48h supera umbral (${zona.umbral_danger}mm/24h).`;
   } else if (rain24 >= zona.umbral_warn || rain48 >= zona.umbral_warn_48h) {
     riesgo = 'warn';
+    estado = 'precaucion_actual';
     razon = `Lluvia: ${rain24.toFixed(0)}mm/24h. Suelo con saturación elevada — riesgo de remoción.`;
   } else if (zona.riesgo_base === 'warn') {
-    riesgo = 'warn';
-    razon = `Zona históricamente activa. Condiciones actuales moderadas (${rain24.toFixed(0)}mm/24h).`;
+    riesgo = 'watch';
+    estado = 'vigilancia_historica';
+    razon = `Zona históricamente activa. No hay umbral de lluvia superado en este momento (${rain24.toFixed(0)}mm/24h).`;
   } else {
     razon = `Sin alerta. Lluvia: ${rain24.toFixed(0)}mm/24h — dentro de parámetros normales.`;
   }
@@ -182,13 +187,14 @@ function evalLandslideRisk(zona, rain24, rain48, prevRiesgo, riverStatus) {
   // Boost si el río tributario ya está en alerta
   if (riverStatus === 'danger' && riesgo !== 'danger') {
     riesgo = 'warn';
+    estado = 'precaucion_actual';
     razon += ' ⚠️ Río tributario en nivel de alerta — riesgo combinado elevado.';
   }
 
-  const empeoró = (prevRiesgo === 'ok' && riesgo !== 'ok') ||
+  const empeoró = (prevRiesgo === 'ok' && (riesgo === 'warn' || riesgo === 'danger')) ||
                   (prevRiesgo === 'warn' && riesgo === 'danger');
 
-  return { riesgo, razon, empeoró };
+  return { riesgo, estado, razon, empeoró };
 }
 
 
@@ -491,12 +497,12 @@ exports.checkRivers = functions.pubsub
       const riverStatus = riverResults[zona.rio_afectado]?.status || 'ok';
       const prevRiesgo  = prevSlides[zona.id]?.riesgo || zona.riesgo_base;
 
-      const { riesgo, razon, empeoró } = evalLandslideRisk(
+      const { riesgo, estado, razon, empeoró } = evalLandslideRisk(
         zona, wx.rain24, wx.rain48, prevRiesgo, riverStatus
       );
 
       slideResults[zona.id] = {
-        riesgo, razon,
+        riesgo, estado, razon,
         rain24: wx.rain24,
         rain48: wx.rain48,
         nasa_power_rain24: nasaWx.rain24,

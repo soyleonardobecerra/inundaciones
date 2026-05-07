@@ -92,6 +92,9 @@
         time:      data.timestamp?.toDate
                      ? timeAgo(data.timestamp.toDate())
                      : 'Ahora',
+        source_time: data.timestamp?.toDate
+                     ? data.timestamp.toDate().toLocaleString('es-CO')
+                     : 'Sin hora exacta',
         rio:       data.rio_id  || null,
         zona_id:   data.zona_id || null,
         tipo:      data.type === 'landslide' ? 'slide' : undefined,
@@ -146,7 +149,7 @@
       window.state.deslizamientos = window.state.deslizamientos.map(z => {
         const fs = data[z.id];
         if (!fs) return z;
-        return { ...z, riesgo_actual: fs.riesgo, razon: fs.razon };
+        return { ...z, riesgo_actual: fs.riesgo, estado: fs.estado, razon: fs.razon };
       });
       if (typeof renderDeslizamientos === 'function') renderDeslizamientos();
     }
@@ -186,6 +189,7 @@
         title: title || 'Nueva alerta',
         desc:  body  || '',
         time:  'Ahora',
+        source_time: new Date().toLocaleString('es-CO'),
         tipo:  payload.data?.type === 'landslide' ? 'slide' : undefined,
       });
       if (typeof renderLiveFeed === 'function') renderLiveFeed();
@@ -495,6 +499,7 @@ main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
   margin-bottom:8px;
 }
 .slide-item.ok { border-left-color: var(--ok) }
+.slide-item.watch { border-left-color: var(--accent) }
 .slide-top  { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px }
 .slide-name { font-size:14px; font-weight:700 }
 .slide-badge {
@@ -502,9 +507,19 @@ main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
   padding:3px 9px; border-radius:20px; flex-shrink:0;
 }
 .slide-badge.ok     { background:rgba(29,184,122,.12); color:var(--ok) }
+.slide-badge.watch  { background:rgba(74,157,255,.12); color:var(--accent) }
 .slide-badge.warn   { background:rgba(240,165,0,.12);  color:var(--warn) }
 .slide-badge.danger { background:rgba(232,53,53,.12);  color:var(--danger) }
 .slide-desc { font-size:13px; color:var(--sub); line-height:1.5 }
+
+.coverage-panel {
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); padding:14px 16px; margin:10px 0 18px;
+}
+.coverage-title { font-size:13px; font-weight:800; margin-bottom:7px }
+.coverage-line { font-size:12px; color:var(--sub); line-height:1.45; margin-top:4px }
+.coverage-line strong { color:var(--txt) }
+.coverage-gap { color:var(--warn); font-weight:700 }
 
 /* ── PRONÓSTICO ──────────────────────────── */
 .forecast {
@@ -818,6 +833,7 @@ main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
   <div class="rio-list" id="river-grid">
     <div class="loading-msg"><span class="spin">⟳</span> Cargando ríos...</div>
   </div>
+  <div id="coverage-panel"></div>
 
   <!-- DESLIZAMIENTOS -->
   <div class="sdiv">Zonas de deslizamiento</div>
@@ -944,10 +960,10 @@ main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
 
   <div class="sdiv" style="margin-top:14px">Acerca de</div>
   <div class="info-box">
-    <strong>AlertaRíos v2.1</strong><br>
-    Datos reales: GloFAS (Copernicus EU), Open-Meteo, IDEAM Colombia, UNGRD.<br>
-    Alertas de deslizamientos basadas en lluvia acumulada (Open-Meteo) y registros históricos UNGRD Norte de Santander.<br><br>
-    <strong>MIT License</strong> · github.com/tu-usuario/alerta-rios
+    <strong>AlertaRíos v2.2</strong><br>
+    Cobertura operativa inicial: Norte de Santander. No reemplaza reportes oficiales de IDEAM, alcaldías, Bomberos, Defensa Civil, UNGRD ni autoridades locales.<br><br>
+    <strong>Estados:</strong> alerta actual, precaución actual, vigilancia histórica, reporte ciudadano y sin datos. Una vigilancia histórica no significa emergencia vigente.<br><br>
+    <strong>Fuentes:</strong> GloFAS/Copernicus, Open-Meteo, NASA POWER, NASA GIBS/IMERG/LANCE, IDEAM y fuentes locales configurables.
   </div>
 </div>
 
@@ -1050,6 +1066,19 @@ const CUENCAS = [
     umbral_warn:120, umbral_danger:250,
     municipios_riesgo:['Sardinata','Cúcuta norte'],
   }
+];
+
+const COVERAGE = {
+  departamentos: ['Norte de Santander'],
+  nota: 'Cobertura operativa inicial. La app no debe presentarse como cobertura nacional hasta validar fuentes por departamento.',
+};
+
+const RIOS_REFERENCIA = [
+  ...CUENCAS.map(c => ({ id:c.id, nombre:c.nombre, cubierto:true })),
+  { id:'peralonso', nombre:'Río Peralonso', cubierto:false },
+  { id:'algodonal', nombre:'Río Algodonal', cubierto:false },
+  { id:'tarra', nombre:'Río Tarra', cubierto:false },
+  { id:'rio_de_oro', nombre:'Río de Oro', cubierto:false },
 ];
 
 // ═══════════════════════════════════════════════════════
@@ -1219,7 +1248,7 @@ async function loadAllData() {
   // ── Analytics: track system state after each data load ──
   const dangerCount = CUENCAS.filter(c=>state.rios[c.id]?.status==='danger').length;
   const warnCount   = CUENCAS.filter(c=>state.rios[c.id]?.status==='warn').length;
-  const slideCount  = (state.deslizamientos||[]).filter(d=>d.riesgo_actual!=='ok').length;
+  const slideCount  = (state.deslizamientos||[]).filter(d=>d.riesgo_actual==='danger'||d.riesgo_actual==='warn').length;
   window.track?.('data_loaded', {
     municipio:     state.municipioActivo,
     danger_rivers: dangerCount,
@@ -1244,17 +1273,22 @@ function evalDeslizamientos(wx) {
   const rain48 = (wx.rain_daily?.[0]||0)+(wx.rain_daily?.[1]||0);
 
   return ZONAS_DESLIZAMIENTO.map(z => {
-    let riesgo = z.riesgo_base;
+    let riesgo = 'ok';
+    let estado = 'normal';
     let razon = '';
 
     if(rain24 >= z.umbral_lluvia_danger || rain48 >= z.umbral_lluvia_danger*1.5) {
       riesgo = 'danger';
+      estado = 'alerta_actual';
       razon = `Lluvia acumulada: ${rain24.toFixed(0)}mm/24h supera umbral crítico (${z.umbral_lluvia_danger}mm).`;
     } else if(rain24 >= z.umbral_lluvia_warn || rain48 >= z.umbral_lluvia_warn*1.5) {
       riesgo = 'warn';
+      estado = 'precaucion_actual';
       razon = `Lluvia: ${rain24.toFixed(0)}mm/24h. Suelo saturado — riesgo elevado.`;
     } else if(z.riesgo_base === 'warn') {
-      razon = 'Zona históricamente activa. Condiciones actuales moderadas.';
+      riesgo = 'watch';
+      estado = 'vigilancia_historica';
+      razon = `Zona históricamente activa. No hay umbral de lluvia superado en este momento (${rain24.toFixed(0)}mm/24h).`;
     } else {
       razon = 'Precipitación dentro de parámetros normales para esta zona.';
     }
@@ -1262,10 +1296,10 @@ function evalDeslizamientos(wx) {
     // Boost risk if river nearby is already stressed
     const rioAfect = state.rios[z.rio_afectado];
     if(rioAfect?.status==='danger' && riesgo!=='danger') {
-      riesgo='warn'; razon += ' ⚠️ Río tributario en nivel de alerta.';
+      riesgo='warn'; estado='precaucion_actual'; razon += ' ⚠️ Río tributario en nivel de alerta.';
     }
 
-    return {...z, riesgo_actual:riesgo, razon};
+    return {...z, riesgo_actual:riesgo, estado, razon};
   });
 }
 
@@ -1317,8 +1351,8 @@ function buildAlerts(wx) {
       const a={level:z.riesgo_actual==='danger'?'danger':'warn',
         src:'ungrd',src_label:'UNGRD / Geología',
         title:`🏔 Deslizamiento — ${z.nombre}`,
-        desc:z.razon + (z.impacto_rio ? ` ${z.impacto_rio}` : ''),
-        time:'Ahora',categoria:'slide',tipo:'slide',lat:z.lat,lon:z.lon};
+        desc:`${z.razon} Fuente: lluvia/modelo + susceptibilidad local.${z.impacto_rio ? ` ${z.impacto_rio}` : ''}`,
+        time:'Ahora',categoria:'slide',tipo:'slide',lat:z.lat,lon:z.lon,estado:z.estado};
       alerts.push(a); liveAlerts.push(a);
     }
   });
@@ -1353,7 +1387,7 @@ function buildAlerts(wx) {
   const badge=document.getElementById('live-badge');
   const liveCount=document.getElementById('live-count');
   if(cnt>0){badge.style.display='block';badge.textContent=cnt;}else{badge.style.display='none';}
-  if(liveCount) liveCount.textContent=`${cnt} activa${cnt!==1?'s':''}`;
+  if(liveCount) liveCount.textContent=`${cnt} alerta${cnt!==1?'s':''} actual${cnt!==1?'es':''}`;
 
   // Banner emergencia
   const hasDanger=alerts.some(a=>a.level==='danger');
@@ -1375,6 +1409,7 @@ function buildAlerts(wx) {
 function renderAll(wx) {
   renderHero();
   renderNearbyRivers();
+  renderCoverage();
   renderDeslizamientos();
   renderNacimientos();
   renderOverflow();
@@ -1408,35 +1443,35 @@ function renderHero() {
 
   if(anyDanger || anySlide) {
     hero.className = 'big-status danger';
-    lvl.textContent = '🚨 PELIGRO';
+    lvl.textContent = '🚨 EMERGENCIA POSIBLE';
     hdrIco.className = 'logo-icon danger';
     hdrSts.className = 'hdr-status danger';
-    hdrSts.textContent = 'ALERTA ROJA';
+    hdrSts.textContent = 'Emergencia';
 
     const rioNombre = riosEnPeligro[0] || zonaSlide?.nombre || 'un río cercano';
-    detail.innerHTML = `<strong>${rioNombre}</strong> está en nivel crítico.${rain24>=30?' Lluvia fuerte registrada.':''}`;
+    detail.innerHTML = `<strong>${escapeHTML(rioNombre)}</strong> está en nivel crítico según las fuentes disponibles.${rain24>=30?' Lluvia fuerte registrada.':''}`;
     action.innerHTML = `<div class="bs-action-ico">🚨</div><div class="bs-action-txt"><strong>Aléjese de ríos y quebradas</strong>Llame al 123 si hay personas en riesgo</div>`;
 
   } else if(anyWarn) {
     hero.className = 'big-status warn';
-    lvl.textContent = '⚠️ PRECAUCIÓN';
+    lvl.textContent = '⚠️ PRECAUCIÓN ACTUAL';
     hdrIco.className = 'logo-icon warn';
     hdrSts.className = 'hdr-status warn';
     hdrSts.textContent = 'Vigilancia';
 
     const rioNombre = riosEnVigia[0] || 'algunos ríos';
-    detail.innerHTML = `<strong>${rioNombre}</strong> está subiendo de nivel.${rain24>=20?' Se esperan lluvias.':''}`;
+    detail.innerHTML = `<strong>${escapeHTML(rioNombre)}</strong> está subiendo de nivel.${rain24>=20?' Se esperan lluvias.':''}`;
     action.innerHTML = `<div class="bs-action-ico">👀</div><div class="bs-action-txt"><strong>Esté atento</strong>Evite cruzar ríos. Siga las noticias locales</div>`;
 
   } else {
     hero.className = 'big-status ok';
-    lvl.textContent = '✅ TODO NORMAL';
+    lvl.textContent = '✅ SIN ALERTAS ACTUALES';
     hdrIco.className = 'logo-icon ok';
     hdrSts.className = 'hdr-status ok';
     hdrSts.textContent = 'Sin alertas';
 
-    detail.innerHTML = `Todos los ríos en niveles normales.${rain24>=10?` Lluvia leve: ${rain24.toFixed(0)}mm.`:' Sin lluvia significativa.'}`;
-    action.innerHTML = `<div class="bs-action-ico">✅</div><div class="bs-action-txt"><strong>Sin riesgo inmediato</strong>Actualizado hace unos momentos con datos reales</div>`;
+    detail.innerHTML = `Los ríos monitoreados están bajo umbrales de alerta.${rain24>=10?` Lluvia leve: ${rain24.toFixed(0)}mm.`:' Sin lluvia significativa.'}`;
+    action.innerHTML = `<div class="bs-action-ico">✅</div><div class="bs-action-txt"><strong>Sin alerta actual</strong>Consulte siempre fuentes oficiales si observa cambios en campo</div>`;
   }
 }
 
@@ -1475,16 +1510,53 @@ function renderNearbyRivers() {
   }).join('');
 }
 
+function renderCoverage() {
+  const panel = document.getElementById('coverage-panel');
+  if(!panel) return;
+  const m = MUNICIPIOS[state.municipioActivo] || MUNICIPIOS.cucuta;
+  const origin = Number.isFinite(state.userLat) && Number.isFinite(state.userLon)
+    ? { lat:state.userLat, lon:state.userLon, label:'tu GPS' }
+    : { lat:m.lat, lon:m.lon, label:m.nombre };
+  const related = (m.rios || []).map(id => RIOS_REFERENCIA.find(r => r.id === id) || {
+    id, nombre: id.replace(/_/g,' '), cubierto:false
+  });
+  const covered = related.filter(r => r.cubierto).map(r => r.nombre);
+  const missing = related.filter(r => !r.cubierto).map(r => r.nombre);
+  const nearbyCovered = CUENCAS
+    .map(c => ({
+      nombre: c.nombre,
+      km: Math.min(
+        distanceKm(origin.lat, origin.lon, c.glofas_lat, c.glofas_lon),
+        distanceKm(origin.lat, origin.lon, c.nacimiento.lat, c.nacimiento.lon),
+        distanceKm(origin.lat, origin.lon, c.desembocadura.lat, c.desembocadura.lon)
+      )
+    }))
+    .sort((a,b)=>a.km-b.km)
+    .slice(0,3);
+
+  panel.innerHTML = `
+    <div class="coverage-panel">
+      <div class="coverage-title">Cobertura cerca de ${escapeHTML(m.nombre)}</div>
+      <div class="coverage-line"><strong>Departamento operativo:</strong> ${COVERAGE.departamentos.join(', ')}</div>
+      <div class="coverage-line"><strong>Referencia espacial:</strong> ${escapeHTML(origin.label)}</div>
+      <div class="coverage-line"><strong>Ríos monitoreados cerca:</strong> ${covered.length ? covered.map(escapeHTML).join(', ') : 'ninguno configurado todavía'}</div>
+      <div class="coverage-line"><strong>Cuencas monitoreadas más cercanas:</strong> ${nearbyCovered.map(r => `${escapeHTML(r.nombre)} (${r.km.toFixed(1)} km aprox.)`).join(', ')}</div>
+      ${missing.length ? `<div class="coverage-line coverage-gap"><strong>Faltan por monitorear:</strong> ${missing.map(escapeHTML).join(', ')}</div>` : ''}
+      <div class="coverage-line">${escapeHTML(COVERAGE.nota)}</div>
+    </div>`;
+}
+
 function renderDeslizamientos() {
   const cont = document.getElementById('slide-container');
-  const active = state.deslizamientos.filter(d=>d.riesgo_actual!=='ok');
+  const current = state.deslizamientos.filter(d=>d.riesgo_actual==='danger'||d.riesgo_actual==='warn');
+  const watch = state.deslizamientos.filter(d=>d.riesgo_actual==='watch');
   const rain24 = state.weather.rain_daily?.[0]||0;
 
-  if(active.length===0) {
+  if(current.length===0 && watch.length===0) {
     cont.innerHTML = `
     <div class="slide-item ok">
       <div class="slide-top">
-        <div class="slide-name">Sin alertas de deslizamiento</div>
+        <div class="slide-name">Sin alertas actuales de deslizamiento</div>
         <div class="slide-badge ok">Normal</div>
       </div>
       <div class="slide-desc">${ZONAS_DESLIZAMIENTO.length} zonas monitoreadas · Lluvia actual: ${rain24.toFixed(0)}mm/24h</div>
@@ -1492,15 +1564,23 @@ function renderDeslizamientos() {
     return;
   }
 
-  cont.innerHTML = active.map(z=>{
+  const cards = [
+    ...current.map(z => ({...z, cardType:z.riesgo_actual})),
+    ...watch.map(z => ({...z, cardType:'watch'})),
+  ];
+
+  cont.innerHTML = cards.map(z=>{
     const rio = CUENCAS.find(c=>c.id===z.rio_afectado)?.nombre || z.rio_afectado;
+    const label = z.riesgo_actual==='danger' ? 'Alerta actual'
+                : z.riesgo_actual==='warn' ? 'Precaución actual'
+                : 'Vigilancia';
     return `
-    <div class="slide-item ${z.riesgo_actual}">
+    <div class="slide-item ${z.cardType}">
       <div class="slide-top">
         <div class="slide-name">🏔 ${z.nombre}</div>
-        <div class="slide-badge ${z.riesgo_actual}">${z.riesgo_actual==='danger'?'Peligro':'Vigilar'}</div>
+        <div class="slide-badge ${z.cardType}">${label}</div>
       </div>
-      <div class="slide-desc">${z.razon} Afecta al <strong>${rio}</strong>.</div>
+      <div class="slide-desc">${escapeHTML(z.razon)} Afecta al <strong>${escapeHTML(rio)}</strong>.</div>
     </div>`;
   }).join('');
 }
@@ -1567,13 +1647,14 @@ function renderFeed() {
     const src = (a.src||'').replace(/[^a-z_]/g,'');
     const srcLabel = escapeHTML(a.src_label||a.src||'');
     const time = escapeHTML(a.time||'Ahora');
+    const exactTime = escapeHTML(a.source_time || a.time || 'Sin hora exacta');
     const title = escapeHTML(a.title||'');
     const desc = escapeHTML(a.desc||'');
     return `
     <div class="alert-item ${a.level}">
       <div class="ai-top">
         <span class="ai-src ${src}">${srcLabel}</span>
-        <span class="ai-time">${time}</span>
+        <span class="ai-time" title="${exactTime}">${time}</span>
       </div>
       <div class="ai-title">${title}</div>
       <div class="ai-desc">${desc}</div>
@@ -1602,15 +1683,16 @@ function renderLiveFeed() {
   feed.innerHTML = filtered.map(a=>{
     const isSlide = a.tipo==='slide';
     const cls     = isSlide?'slide':a.level;
-    const lvlTxt  = a.level==='danger'?'PELIGRO':a.level==='warn'?'PRECAUCIÓN':isSlide?'DESLIZ.':'INFO';
+    const lvlTxt  = a.level==='danger'?'EMERGENCIA':a.level==='warn'?'PRECAUCIÓN':isSlide?'DESLIZ.':'INFO';
     const time = escapeHTML(a.time||'Ahora');
+    const exactTime = escapeHTML(a.source_time || a.time || 'Sin hora exacta');
     const title = escapeHTML(a.title||'');
     const desc = escapeHTML(a.desc||'');
     return `
     <div class="lcard ${cls}">
       <div class="lc-top">
         <div class="lc-lvl ${cls}"><div class="lc-dot ${cls}"></div>${lvlTxt}</div>
-        <div class="lc-time">${time}</div>
+        <div class="lc-time" title="${exactTime}">${time}</div>
       </div>
       <div class="lc-title">${title}</div>
       <div class="lc-body">${desc}</div>
@@ -1674,10 +1756,11 @@ function refreshMapMarkers() {
   // Deslizamientos
   state.deslizamientos.forEach(z=>{
     if(z.riesgo_actual==='ok') return;
-    const col=z.riesgo_actual==='danger'?'#f0433a':'#c874ff';
-    const sIco=L.divIcon({html:`<div style="width:16px;height:16px;background:${col};border:2px solid rgba(255,255,255,.7);border-radius:3px;box-shadow:0 0 8px ${col};transform:rotate(45deg)"></div>`,className:'',iconSize:[16,16],iconAnchor:[8,8]});
+    const col=z.riesgo_actual==='danger'?'#f0433a':z.riesgo_actual==='warn'?'#f5a623':'#4a9dff';
+    const opacity = z.riesgo_actual==='watch' ? '.5' : '1';
+    const sIco=L.divIcon({html:`<div style="width:16px;height:16px;background:${col};opacity:${opacity};border:2px solid rgba(255,255,255,.7);border-radius:3px;box-shadow:0 0 8px ${col};transform:rotate(45deg)"></div>`,className:'',iconSize:[16,16],iconAnchor:[8,8]});
     L.marker([z.lat,z.lon],{icon:sIco}).addTo(state.map)
-      .bindPopup(`<b style="color:${col}">🏔 ${z.nombre}</b><br>${z.razon}`);
+      .bindPopup(`<b style="color:${col}">🏔 ${z.nombre}</b><br>${escapeHTML(z.razon)}<br><small>${z.riesgo_actual==='watch'?'Vigilancia histórica, no alerta actual':'Alerta/precaución actual'}</small>`);
   });
 
   // User location
@@ -1759,10 +1842,20 @@ function useGPS() {
 function findNearestMunicipio(lat,lon) {
   let nearest='cucuta', minDist=Infinity;
   Object.entries(MUNICIPIOS).forEach(([id,m])=>{
-    const d=Math.hypot(lat-m.lat,lon-m.lon);
+    const d=distanceKm(lat,lon,m.lat,m.lon);
     if(d<minDist){minDist=d;nearest=id;}
   });
   return nearest;
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = deg => deg * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
 function onMunicipioChange(val) {
