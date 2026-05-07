@@ -211,6 +211,14 @@ const IDEAM_FEEDS = [
   },
 ];
 
+// Entidades locales/regionales. Agrega aqui RSS/Atom publicos de alcaldias,
+// Bomberos, Defensa Civil, gestion del riesgo, CORPONOR, etc.
+const LOCAL_ENTITY_FEEDS = [
+  // { id: 'corponor_alertas', name: 'CORPONOR Alertas', url: 'https://...', type: 'rss' },
+];
+
+const OFFICIAL_FEEDS = [...IDEAM_FEEDS, ...LOCAL_ENTITY_FEEDS];
+
 // Palabras clave región Norte de Santander
 const IDEAM_KEYWORDS_REGION = [
   'norte de santander', 'nortesantander', 'cúcuta', 'cucuta',
@@ -284,6 +292,28 @@ async function fetchIDEAMFeed(feed) {
   } catch (e) {
     console.warn(`[IDEAM] ${feed.id} error:`, e.message);
     return [];
+  }
+}
+
+async function getNASAPowerRain(lat, lon) {
+  const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const url = 'https://power.larc.nasa.gov/api/temporal/hourly/point'
+    + `?parameters=PRECTOTCORR&community=AG&longitude=${lon}&latitude=${lat}`
+    + `&start=${ymd}&end=${ymd}&format=JSON&time-standard=UTC`;
+
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'AlertaRios/2.1 Colombia' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const values = d.properties?.parameter?.PRECTOTCORR || {};
+    const rain24 = Object.values(values)
+      .map(Number)
+      .filter(value => Number.isFinite(value) && value >= 0)
+      .reduce((sum, value) => sum + value, 0);
+    return { ok: true, rain24 };
+  } catch (e) {
+    console.warn(`NASA POWER error (${lat},${lon}):`, e.message);
+    return { ok: false, rain24: null, error: e.message };
   }
 }
 
@@ -419,26 +449,44 @@ exports.checkRivers = functions.pubsub
     }
 
     // ── 2. CHECK RAIN (región general) ─────────────────
-    const regionWx = await getWeatherAt(7.89, -72.51);
+    const [regionWx, nasaRegionWx] = await Promise.all([
+      getWeatherAt(7.89, -72.51),
+      getNASAPowerRain(7.89, -72.51),
+    ]);
 
-    if (regionWx.ok && regionWx.rain24 >= 60 && (prevRivers._rain_alerted_at || 0) < Date.now() - 3 * 3600 * 1000) {
+    riverResults._rain_sources = {
+      open_meteo: { ok: regionWx.ok, rain24: regionWx.rain24, error: regionWx.error || null },
+      nasa_power: { ok: nasaRegionWx.ok, rain24: nasaRegionWx.rain24, error: nasaRegionWx.error || null },
+      updated_at: Date.now(),
+    };
+
+    const rainCandidates = [
+      regionWx.ok ? { source: 'Open-Meteo', rain24: regionWx.rain24 } : null,
+      nasaRegionWx.ok ? { source: 'NASA POWER', rain24: nasaRegionWx.rain24 } : null,
+    ].filter(Boolean);
+    const regionRain = rainCandidates.sort((a, b) => b.rain24 - a.rain24)[0] || null;
+
+    if (regionRain && regionRain.rain24 >= 60 && (prevRivers._rain_alerted_at || 0) < Date.now() - 3 * 3600 * 1000) {
       newAlerts.push({
         type:   'rain',
         level:  'danger',
-        title:  `🌧 Lluvia extrema — ${regionWx.rain24.toFixed(0)}mm/24h`,
+        title:  `🌧 Lluvia extrema — ${regionRain.rain24.toFixed(0)}mm/24h`,
         body:   `Alta probabilidad de crecientes repentinas en todos los ríos de montaña. Evitar zonas ribereñas.`,
-        source: 'Open-Meteo',
+        source: regionRain.source,
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
       riverResults._rain_alerted_at = Date.now();
-    } else if (regionWx.ok && regionWx.rain24 >= 30 && regionWx.rain24 < 60) {
+    } else if (regionRain && regionRain.rain24 >= 30 && regionRain.rain24 < 60) {
       // Solo guardar en estado, sin push para lluvia moderada
     }
 
     // ── 3. CHECK LANDSLIDES ─────────────────────────────
     for (const zona of ZONAS_DESLIZAMIENTO) {
       // Fetch weather specifically for each landslide zone
-      const wx = await getWeatherAt(zona.lat, zona.lon);
+      const [wx, nasaWx] = await Promise.all([
+        getWeatherAt(zona.lat, zona.lon),
+        getNASAPowerRain(zona.lat, zona.lon),
+      ]);
 
       const riverStatus = riverResults[zona.rio_afectado]?.status || 'ok';
       const prevRiesgo  = prevSlides[zona.id]?.riesgo || zona.riesgo_base;
@@ -451,8 +499,10 @@ exports.checkRivers = functions.pubsub
         riesgo, razon,
         rain24: wx.rain24,
         rain48: wx.rain48,
+        nasa_power_rain24: nasaWx.rain24,
         data_available: wx.ok,
-        source_error: wx.error || null,
+        nasa_power_available: nasaWx.ok,
+        source_error: [wx.error, nasaWx.error].filter(Boolean).join(' | ') || null,
         rio_afectado: zona.rio_afectado,
         municipio: zona.municipio,
         timestamp: Date.now(),
@@ -503,7 +553,7 @@ exports.checkRivers = functions.pubsub
       );
 
       const allIDEAMItems = (
-        await Promise.all(IDEAM_FEEDS.map(fetchIDEAMFeed))
+        await Promise.all(OFFICIAL_FEEDS.map(fetchIDEAMFeed))
       ).flat();
 
       for (const item of allIDEAMItems) {
@@ -710,7 +760,7 @@ exports.refreshIDEAM = functions.https.onRequest(async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {
-    const allItems = (await Promise.all(IDEAM_FEEDS.map(fetchIDEAMFeed))).flat();
+    const allItems = (await Promise.all(OFFICIAL_FEEDS.map(fetchIDEAMFeed))).flat();
 
     const recentSnap = await db.collection('alerts')
       .where('source', '==', 'IDEAM Oficial')

@@ -1116,16 +1116,33 @@ const ZONAS_DESLIZAMIENTO = [
 let state = {
   rios:{}, weather:{}, alerts:[], liveAlerts:[],
   lastUpdate:null, notifyOn:false,
-  map:null, mapLayer:'dark', userLat:null, userLon:null,
+  map:null, baseLayer:null, nasaOverlay:null, mapLayer:'dark', userLat:null, userLon:null,
   municipioActivo:'cucuta', tipoReporte:'inundacion',
   liveFilter:'all', deslizamientos:[]
+};
+
+const NASA_GIBS_WMS = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi';
+const NASA_GIBS_LAYERS = {
+  rain: {
+    name: 'NASA GPM IMERG lluvia',
+    layers: 'IMERG_Precipitation_Rate_v7_NRT',
+    opacity: 0.55,
+  },
+  flood: {
+    name: 'NASA LANCE MODIS inundacion',
+    layers: 'MODIS_Aqua_Terra_Flood_2-Day',
+    opacity: 0.65,
+  },
 };
 
 const SOURCES_INFO = [
   {name:'GloFAS / Copernicus EU', desc:'Caudal de ríos (m³/s)'},
   {name:'Open-Meteo', desc:'Precipitación y pronóstico climático'},
-  {name:'NASA POWER', desc:'Clima histórico y radiación'},
+  {name:'NASA POWER', desc:'Precipitación horaria satelital/reanálisis'},
+  {name:'NASA GPM IMERG', desc:'Lluvia casi en tiempo real por satélite'},
+  {name:'NASA LANCE MODIS/VIIRS', desc:'Mapas globales NRT de agua/inundación'},
   {name:'IDEAM Colombia', desc:'Alertas hidrológicas oficiales'},
+  {name:'Entidades locales', desc:'Feeds RSS públicos configurables en Functions'},
   {name:'UNGRD Colombia', desc:'Inventario de deslizamientos'},
   {name:'OpenStreetMap / Leaflet', desc:'Cartografía base'},
   {name:'IDEAM Oficial', desc:'Alertas hidrometeorológicas — Colombia'},
@@ -1621,7 +1638,7 @@ function initMap() {
   const m=MUNICIPIOS[state.municipioActivo];
   state.map=L.map('map',{zoomControl:false}).setView([m.lat,m.lon],9);
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+  state.baseLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
     attribution:'© OSM © CARTO', maxZoom:18
   }).addTo(state.map);
 
@@ -1676,11 +1693,42 @@ function centerOnGPS() {
 
 function toggleMapLayer() {
   if(!state.map) return;
-  state.map.eachLayer(l=>{if(l instanceof L.TileLayer)state.map.removeLayer(l);});
-  state.mapLayer=state.mapLayer==='dark'?'light':'dark';
-  const url=state.mapLayer==='dark'?'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png':'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-  L.tileLayer(url,{attribution:'© OSM © CARTO',maxZoom:18}).addTo(state.map);
+  const order = ['dark', 'light', 'nasa_rain', 'nasa_flood'];
+  state.mapLayer = order[(order.indexOf(state.mapLayer) + 1) % order.length];
+  applyMapLayer();
   window.track?.('map_layer_toggled', { new_layer: state.mapLayer });
+}
+
+function gibsDate(daysBack = 1) {
+  const d = new Date(Date.now() - daysBack * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
+function applyMapLayer() {
+  if(state.baseLayer) state.map.removeLayer(state.baseLayer);
+  if(state.nasaOverlay) {
+    state.map.removeLayer(state.nasaOverlay);
+    state.nasaOverlay = null;
+  }
+
+  const useLight = state.mapLayer === 'light';
+  const baseUrl = useLight
+    ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+
+  state.baseLayer = L.tileLayer(baseUrl, { attribution:'© OSM © CARTO', maxZoom:18 }).addTo(state.map);
+
+  if(state.mapLayer === 'nasa_rain' || state.mapLayer === 'nasa_flood') {
+    const cfg = state.mapLayer === 'nasa_rain' ? NASA_GIBS_LAYERS.rain : NASA_GIBS_LAYERS.flood;
+    state.nasaOverlay = L.tileLayer.wms(NASA_GIBS_WMS, {
+      layers: cfg.layers,
+      format: 'image/png',
+      transparent: true,
+      time: gibsDate(),
+      opacity: cfg.opacity,
+      attribution: 'NASA GIBS',
+    }).addTo(state.map);
+  }
 }
 
 // ═══════════════════════════════════════════════════════
