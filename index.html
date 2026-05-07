@@ -5,10 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="theme-color" content="#080e1a">
 <meta name="description" content="Alertas reales de inundaciones, deslizamientos y crecientes — Norte de Santander, Colombia">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="AlertaRíos">
 <link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-96.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <title>AlertaRíos — Alertas Reales</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -1793,8 +1796,10 @@ function filterLive(type,btn) {
 }
 
 function setLiveStatus(msg,ok) {
-  document.getElementById('live-txt').textContent=msg;
-  document.getElementById('live-dot').className='pulse'+(ok?'':' err');
+  const txt = document.getElementById('live-txt');
+  const dot = document.getElementById('live-dot');
+  if(txt) txt.textContent=msg;
+  if(dot) dot.className='pulse'+(ok?'':' err');
 }
 
 async function toggleNotify() {

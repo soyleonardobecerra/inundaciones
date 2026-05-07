@@ -1,15 +1,20 @@
 // sw.js — AlertaRíos v2.1
 // Service Worker: offline cache + push notifications
 
-const CACHE_NAME    = 'alerta-rios-v2.1';
-const CACHE_STATIC  = 'alerta-rios-static-v2.1';
-const CACHE_DATA    = 'alerta-rios-data-v2.1';
+const CACHE_NAME    = 'alerta-rios-v2.2';
+const CACHE_STATIC  = 'alerta-rios-static-v2.2';
+const CACHE_DATA    = 'alerta-rios-data-v2.2';
+
+const appUrl = path => new URL(path, self.registration.scope).toString();
 
 // Archivos estáticos que siempre se cachean en la instalación
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
+  appUrl('./'),
+  appUrl('index.html'),
+  appUrl('manifest.json'),
+  appUrl('icons/icon-96.png'),
+  appUrl('icons/icon-144.png'),
+  appUrl('icons/icon-192.png'),
   'https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
@@ -117,7 +122,7 @@ async function staleWhileRevalidate(request, cacheName) {
 // Respuesta offline para la app principal
 async function offlineFallback(request) {
   if (request.mode === 'navigate') {
-    const cached = await caches.match('/index.html');
+    const cached = await caches.match(appUrl('index.html'));
     if (cached) return cached;
   }
   return new Response(
@@ -146,8 +151,8 @@ self.addEventListener('push', event => {
   const isSlide   = type === 'landslide';
   const isDanger  = level === 'danger';
 
-  const icon  = '/icons/icon-192.png';
-  const badge = '/icons/icon-72.png';
+  const icon  = appUrl('icons/icon-192.png');
+  const badge = appUrl('icons/icon-72.png');
 
   const vibrate = isDanger
     ? (isSlide ? [0, 500, 200, 500, 200, 500] : [0, 300, 150, 600, 150, 300])
@@ -201,7 +206,7 @@ self.addEventListener('notificationclick', event => {
           return client.focus();
         }
       }
-      return clients.openWindow('/');
+      return clients.openWindow(appUrl('./'));
     })
   );
 });
