@@ -117,11 +117,14 @@ async function getDischarge(lat, lon, days = 3) {
   const url = `https://flood-api.open-meteo.com/v1/flood?latitude=${lat}&longitude=${lon}&daily=river_discharge&forecast_days=${days}`;
   try {
     const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    return d.daily?.river_discharge || [0];
+    const values = d.daily?.river_discharge;
+    if (!Array.isArray(values) || values.length === 0) throw new Error('Sin datos de caudal');
+    return { ok: true, values };
   } catch (e) {
     console.error(`GloFAS error (${lat},${lon}):`, e.message);
-    return [0];
+    return { ok: false, values: [], error: e.message };
   }
 }
 
@@ -132,16 +135,19 @@ async function getWeatherAt(lat, lon) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=precipitation_sum,precipitation_probability_max&timezone=America%2FBogota&forecast_days=3`;
   try {
     const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    const rain = d.daily?.precipitation_sum || [0, 0, 0];
+    const rain = d.daily?.precipitation_sum;
+    if (!Array.isArray(rain) || rain.length === 0) throw new Error('Sin datos de lluvia');
     return {
+      ok: true,
       rain24: rain[0] || 0,
       rain48: (rain[0] || 0) + (rain[1] || 0),
       rain72: (rain[0] || 0) + (rain[1] || 0) + (rain[2] || 0),
     };
   } catch (e) {
     console.error(`Weather error (${lat},${lon}):`, e.message);
-    return { rain24: 0, rain48: 0, rain72: 0 };
+    return { ok: false, rain24: null, rain48: null, rain72: null, error: e.message };
   }
 }
 
@@ -149,6 +155,14 @@ async function getWeatherAt(lat, lon) {
 //  HELPER — eval landslide risk for a zona given rain
 // ══════════════════════════════════════════════════════
 function evalLandslideRisk(zona, rain24, rain48, prevRiesgo, riverStatus) {
+  if (rain24 == null || rain48 == null) {
+    return {
+      riesgo: prevRiesgo || zona.riesgo_base || 'unknown',
+      razon: 'Fuente de lluvia no disponible. Mantener vigilancia y consultar fuentes oficiales.',
+      empeoró: false,
+    };
+  }
+
   let riesgo = zona.riesgo_base;
   let razon = '';
 
@@ -300,11 +314,26 @@ exports.checkRivers = functions.pubsub
 
     // ── 1. CHECK RIVERS ────────────────────────────────
     for (const c of CUENCAS) {
-      const [arr_bajo, arr_alto] = await Promise.all([
+      const [bajoData, altoData] = await Promise.all([
         getDischarge(c.lat, c.lon, 3),
         getDischarge(c.lat_alto, c.lon_alto, 3),
       ]);
 
+      if (!bajoData.ok || !altoData.ok) {
+        const prev = prevRivers[c.id] || {};
+        riverResults[c.id] = {
+          ...prev,
+          status: prev.status || 'unknown',
+          upstream_status: prev.upstream_status || 'unknown',
+          data_available: false,
+          source_error: [bajoData.error, altoData.error].filter(Boolean).join(' | '),
+          timestamp: Date.now(),
+        };
+        continue;
+      }
+
+      const arr_bajo = bajoData.values;
+      const arr_alto = altoData.values;
       const q_bajo = arr_bajo[0] || 0;
       const q_alto = arr_alto[0] || 0;
       const q_bajo_ayer = arr_bajo[1] || q_bajo;
@@ -392,7 +421,7 @@ exports.checkRivers = functions.pubsub
     // ── 2. CHECK RAIN (región general) ─────────────────
     const regionWx = await getWeatherAt(7.89, -72.51);
 
-    if (regionWx.rain24 >= 60 && (prevRivers._rain_alerted_at || 0) < Date.now() - 3 * 3600 * 1000) {
+    if (regionWx.ok && regionWx.rain24 >= 60 && (prevRivers._rain_alerted_at || 0) < Date.now() - 3 * 3600 * 1000) {
       newAlerts.push({
         type:   'rain',
         level:  'danger',
@@ -402,7 +431,7 @@ exports.checkRivers = functions.pubsub
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       });
       riverResults._rain_alerted_at = Date.now();
-    } else if (regionWx.rain24 >= 30 && regionWx.rain24 < 60) {
+    } else if (regionWx.ok && regionWx.rain24 >= 30 && regionWx.rain24 < 60) {
       // Solo guardar en estado, sin push para lluvia moderada
     }
 
@@ -422,6 +451,8 @@ exports.checkRivers = functions.pubsub
         riesgo, razon,
         rain24: wx.rain24,
         rain48: wx.rain48,
+        data_available: wx.ok,
+        source_error: wx.error || null,
         rio_afectado: zona.rio_afectado,
         municipio: zona.municipio,
         timestamp: Date.now(),
@@ -670,9 +701,12 @@ exports.getIDEAMAlerts = functions.https.onRequest(async (req, res) => {
 // ══════════════════════════════════════════════════════
 exports.refreshIDEAM = functions.https.onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
-  // Basic protection: require a secret header
+  // Basic protection: require a configured secret header.
   const secret = functions.config().app?.admin_secret || '';
-  if (secret && req.headers['x-admin-secret'] !== secret) {
+  if (!secret) {
+    return res.status(503).json({ error: 'Admin secret is not configured' });
+  }
+  if (req.headers['x-admin-secret'] !== secret) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   try {

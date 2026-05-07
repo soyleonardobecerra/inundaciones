@@ -16,7 +16,7 @@
 <script type="module">
   import { initializeApp }                          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
   import { getAnalytics, logEvent, setUserProperties } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics.js';
-  import { getFirestore, collection, doc, onSnapshot, addDoc, serverTimestamp, query, orderBy, limit }
+  import { getFirestore, collection, doc, onSnapshot, query, orderBy, limit }
                                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
   import { getMessaging, getToken, onMessage }      from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js';
 
@@ -191,18 +191,18 @@
     showToast(title, body, level);
   });
 
-  // ── Enviar reporte ciudadano a Firestore ────────────
-  window.submitToFirestore = async (report) => {
+  // ── Enviar reporte ciudadano por Cloud Functions ─────
+  window.submitCitizenReport = async (report) => {
     try {
-      await addDoc(collection(db, 'alerts'), {
-        ...report,
-        type:      'citizen_report',
-        source:    'Reporte ciudadano',
-        timestamp: serverTimestamp(),
+      const response = await fetch('/api/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(report),
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return true;
     } catch (e) {
-      console.warn('[Firestore] Error guardando reporte:', e.message);
+      console.warn('[Reports] Error enviando reporte:', e.message);
       return false;
     }
   };
@@ -960,6 +960,27 @@ main { max-width:640px; margin:0 auto; padding:16px 16px 100px }
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
+}
+
+function formatNumber(value, digits = 0) {
+  return Number.isFinite(value) ? value.toFixed(digits) : 'Sin datos';
+}
+
+function formatStatus(status) {
+  return status === 'danger' ? 'PELIGRO'
+       : status === 'warn'   ? 'VIGILAR'
+       : status === 'ok'     ? 'OK'
+       : 'SIN DATOS';
+}
+
 // ═══════════════════════════════════════════════════════
 //  MUNICIPIOS DE NORTE DE SANTANDER — centro y ríos cercanos
 // ═══════════════════════════════════════════════════════
@@ -1412,9 +1433,11 @@ function renderNearbyRivers() {
     // Texto de estado en lenguaje claro
     const statusTxt = r.status==='danger' ? 'Nivel muy alto — alejarse'
                     : r.status==='warn'   ? 'Nivel alto — vigilar'
-                    : 'Nivel normal';
+                    : r.status==='ok'     ? 'Nivel normal'
+                    : 'Fuente no disponible';
 
-    const trendTxt = r.trend > 1   ? '↑ Subiendo rápido'
+    const trendTxt = !Number.isFinite(r.trend) ? 'Sin tendencia'
+                   : r.trend > 1   ? '↑ Subiendo rápido'
                    : r.trend > 0.2 ? '↑ Subiendo'
                    : r.trend < -0.2? '↓ Bajando'
                    : '→ Estable';
@@ -1427,7 +1450,7 @@ function renderNearbyRivers() {
         <div class="rio-name">${c.nombre}</div>
         <div class="rio-sub ${r.status}">${statusTxt} · ${trendTxt}</div>
       </div>
-      <div class="rio-level ${r.status}">${r.status==='danger'?'PELIGRO':r.status==='warn'?'VIGILAR':'OK'}</div>
+      <div class="rio-level ${r.status}">${formatStatus(r.status)}</div>
     </div>`;
   }).join('');
 }
@@ -1479,6 +1502,7 @@ function renderNacimientos() {
     const us = r.upstream_status;
     const msg = us==='danger' ? '🚨 Creciente en el nacimiento. Puede llegar al tramo bajo en 2–6 horas.'
               : us==='warn'   ? '⚠️ Caudal elevado en la parte alta. Vigilar.'
+              : us==='unknown'? 'Fuente de caudal no disponible. Consultar fuentes oficiales.'
               :                 '✅ Nacimiento en niveles normales.';
     return `
     <div class="nac-card">
@@ -1487,12 +1511,12 @@ function renderNacimientos() {
           <div class="nac-src">${c.nacimiento.nombre}</div>
           <div class="nac-name">${c.nombre}</div>
         </div>
-        <div class="nac-badge ${us}">${us==='ok'?'Normal':us==='warn'?'Vigilar':'Alerta'}</div>
+        <div class="nac-badge ${us}">${us==='ok'?'Normal':us==='warn'?'Vigilar':us==='unknown'?'Sin datos':'Alerta'}</div>
       </div>
       <div class="nac-row">
-        <div class="nac-stat"><div class="nac-val">${r.q_alto.toFixed(0)}</div><div class="nac-lbl">m³/s arriba</div></div>
-        <div class="nac-stat"><div class="nac-val">${r.q_bajo.toFixed(0)}</div><div class="nac-lbl">m³/s abajo</div></div>
-        <div class="nac-stat"><div class="nac-val" style="color:${r.trend>0?'var(--danger)':r.trend<0?'var(--ok)':'var(--sub)'}">${r.trend>0?'↑':r.trend<0?'↓':'→'}</div><div class="nac-lbl">tendencia</div></div>
+        <div class="nac-stat"><div class="nac-val">${formatNumber(r.q_alto,0)}</div><div class="nac-lbl">m³/s arriba</div></div>
+        <div class="nac-stat"><div class="nac-val">${formatNumber(r.q_bajo,0)}</div><div class="nac-lbl">m³/s abajo</div></div>
+        <div class="nac-stat"><div class="nac-val" style="color:${r.trend>0?'var(--danger)':r.trend<0?'var(--ok)':'var(--sub)'}">${Number.isFinite(r.trend) ? (r.trend>0?'↑':r.trend<0?'↓':'→') : '—'}</div><div class="nac-lbl">tendencia</div></div>
       </div>
       <div class="nac-msg ${us}">${msg}${r.time_to_flood?' Tiempo estimado: ~'+r.time_to_flood+'h.':''}</div>
     </div>`;
@@ -1521,14 +1545,18 @@ function renderFeed() {
   if(!feed) return;
   feed.innerHTML = state.alerts.slice(0,8).map(a=>{
     const src = (a.src||'').replace(/[^a-z_]/g,'');
+    const srcLabel = escapeHTML(a.src_label||a.src||'');
+    const time = escapeHTML(a.time||'Ahora');
+    const title = escapeHTML(a.title||'');
+    const desc = escapeHTML(a.desc||'');
     return `
     <div class="alert-item ${a.level}">
       <div class="ai-top">
-        <span class="ai-src ${src}">${a.src_label||a.src}</span>
-        <span class="ai-time">${a.time||'Ahora'}</span>
+        <span class="ai-src ${src}">${srcLabel}</span>
+        <span class="ai-time">${time}</span>
       </div>
-      <div class="ai-title">${a.title}</div>
-      <div class="ai-desc">${a.desc}</div>
+      <div class="ai-title">${title}</div>
+      <div class="ai-desc">${desc}</div>
     </div>`;
   }).join('');
 }
@@ -1555,14 +1583,17 @@ function renderLiveFeed() {
     const isSlide = a.tipo==='slide';
     const cls     = isSlide?'slide':a.level;
     const lvlTxt  = a.level==='danger'?'PELIGRO':a.level==='warn'?'PRECAUCIÓN':isSlide?'DESLIZ.':'INFO';
+    const time = escapeHTML(a.time||'Ahora');
+    const title = escapeHTML(a.title||'');
+    const desc = escapeHTML(a.desc||'');
     return `
     <div class="lcard ${cls}">
       <div class="lc-top">
         <div class="lc-lvl ${cls}"><div class="lc-dot ${cls}"></div>${lvlTxt}</div>
-        <div class="lc-time">${a.time||'Ahora'}</div>
+        <div class="lc-time">${time}</div>
       </div>
-      <div class="lc-title">${a.title}</div>
-      <div class="lc-body">${a.desc}</div>
+      <div class="lc-title">${title}</div>
+      <div class="lc-body">${desc}</div>
       <div class="lc-btns">
         <button class="lc-btn primary" onclick="goTab('mapa',document.getElementById('btn-mapa'))">Ver en mapa</button>
         ${a.level==='danger'?`<button class="lc-btn" onclick="window.location.href='tel:123'">📞 123</button>`:''}
@@ -1758,21 +1789,23 @@ function showRiverDetail(id) {
   const c=CUENCAS.find(x=>x.id===id);
   const r=state.rios[id];
   if(!c||!r) return;
-  window.track?.('river_detail_viewed', { rio_id: id, rio_status: r.status, q_bajo: Math.round(r.q_bajo) });
+  window.track?.('river_detail_viewed', { rio_id: id, rio_status: r.status, q_bajo: Number.isFinite(r.q_bajo) ? Math.round(r.q_bajo) : null });
   alert([
     `${c.nombre}`,`Nacimiento: ${c.nacimiento.nombre}`,
     `────────────────────`,
-    `Caudal cuenca alta: ${r.q_alto.toFixed(1)} m³/s`,
-    `Caudal tramo bajo: ${r.q_bajo.toFixed(1)} m³/s`,
-    `Tendencia: ${r.trend>0?'↑ Subiendo':r.trend<0?'↓ Bajando':'→ Estable'} ${Math.abs(r.trend).toFixed(1)} m³/s·h`,
+    `Caudal cuenca alta: ${formatNumber(r.q_alto,1)} m³/s`,
+    `Caudal tramo bajo: ${formatNumber(r.q_bajo,1)} m³/s`,
+    Number.isFinite(r.trend)
+      ? `Tendencia: ${r.trend>0?'↑ Subiendo':r.trend<0?'↓ Bajando':'→ Estable'} ${Math.abs(r.trend).toFixed(1)} m³/s·h`
+      : `Tendencia: sin datos`,
     `────────────────────`,
     `Umbral precaución: ${c.umbral_warn} m³/s`,
     `Umbral crítico: ${c.umbral_danger} m³/s`,
-    `Estado: ${r.status.toUpperCase()}`,
+    `Estado: ${formatStatus(r.status)}`,
     r.time_to_flood?`⏱ Tiempo al umbral crítico: ~${r.time_to_flood}h`:'',
     `────────────────────`,
     `Municipios en riesgo: ${c.municipios_riesgo.join(', ')}`,
-    `Fuente: GloFAS / Copernicus EU`
+    r.data_available === false ? `Fuente: GloFAS no disponible (${r.source_error || 'sin detalle'})` : `Fuente: GloFAS / Copernicus EU`
   ].filter(Boolean).join('\n'));
 }
 
@@ -1794,10 +1827,15 @@ async function submitReport() {
   };
 
   // Guardar en Firestore (visible para todos en tiempo real)
-  const saved = window.submitToFirestore
-    ? await window.submitToFirestore({
-        level:urgencia, tipo, lugar, rio_id:rio||null,
-        title: newAlert.title, body: newAlert.desc,
+  const saved = window.submitCitizenReport
+    ? await window.submitCitizenReport({
+        tipo,
+        lugar,
+        rio: rio || null,
+        descripcion: desc,
+        urgencia,
+        lat: null,
+        lon: null,
       })
     : false;
   window.track?.('citizen_report_submitted', {
